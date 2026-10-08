@@ -28,6 +28,17 @@ impl AgentState {
             AgentState::Closed => "closed",
         }
     }
+
+    pub fn from_tmux_raw(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "busy" | "working" => Some(AgentState::Working),
+            "question" | "awaiting_input" => Some(AgentState::AwaitingInput),
+            "permission" => Some(AgentState::Permission),
+            "error" => Some(AgentState::Error),
+            "idle" => Some(AgentState::Idle),
+            _ => None,
+        }
+    }
 }
 
 impl std::str::FromStr for AgentState {
@@ -59,6 +70,9 @@ pub struct AgentUpdate {
 #[async_trait]
 pub trait OutputAdapter: Send + Sync {
     async fn update(&self, update: &AgentUpdate) -> anyhow::Result<()>;
+    async fn rehydrate(&self, _update: &AgentUpdate) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 // ==========================================
@@ -131,6 +145,13 @@ impl OutputAdapter for WaybarAdapter {
         }
 
         tracing::info!("WaybarAdapter updated to: {}", raw_state);
+        Ok(())
+    }
+
+    async fn rehydrate(&self, update: &AgentUpdate) -> anyhow::Result<()> {
+        if update.state != AgentState::Idle && update.state != AgentState::Closed {
+            self.update(update).await?;
+        }
         Ok(())
     }
 }
@@ -499,6 +520,20 @@ impl OutputAdapter for TmuxAdapter {
             update.pane_id,
             update.state
         );
+        Ok(())
+    }
+
+    async fn rehydrate(&self, update: &AgentUpdate) -> anyhow::Result<()> {
+        // Record pane state in internal cache to prevent redundant updates
+        {
+            let mut states = self.pane_states.lock().await;
+            states.insert(update.pane_id.clone(), update.state.clone());
+        }
+
+        // If the agent was working, resume spinner animation without bells
+        if update.state == AgentState::Working {
+            self.start_spinner(update.pane_id.clone()).await;
+        }
         Ok(())
     }
 }

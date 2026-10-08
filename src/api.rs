@@ -82,6 +82,70 @@ impl ApiState {
             }
         }
     }
+
+    pub async fn rehydrate_from_raw_lines(&self, lines: &str, now_secs: u64) {
+        for line in lines.lines() {
+            let mut parts = line.split('\t');
+            let pane_id = match parts.next() {
+                Some(id) if !id.trim().is_empty() => id.trim(),
+                _ => continue,
+            };
+            let raw_state = match parts.next() {
+                Some(s) if !s.trim().is_empty() => s.trim(),
+                _ => continue,
+            };
+
+            if let Some(state) = AgentState::from_tmux_raw(raw_state) {
+                let seq = self
+                    .next_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+                {
+                    let mut states = self.pane_states.lock().await;
+                    states.insert(
+                        pane_id.to_string(),
+                        PaneStateInfo {
+                            last_timestamp: now_secs,
+                            seq_id: seq,
+                            state: state.clone(),
+                            message: None,
+                        },
+                    );
+                }
+
+                let update = AgentUpdate {
+                    pane_id: pane_id.to_string(),
+                    state,
+                    message: None,
+                };
+
+                for adapter in self.adapters.iter() {
+                    if let Err(e) = adapter.rehydrate(&update).await {
+                        tracing::warn!("Adapter rehydrate error for pane {}: {}", pane_id, e);
+                    }
+                }
+                tracing::info!("Rehydrated pane {} with state {:?}", pane_id, update.state);
+            }
+        }
+    }
+
+    pub async fn rehydrate_from_tmux(&self) {
+        let output = match tokio::process::Command::new("tmux")
+            .args(["list-panes", "-a", "-F", "#{pane_id}\t#{@ai_agent_state_raw}"])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return,
+        };
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        self.rehydrate_from_raw_lines(&output, now_secs).await;
+    }
 }
 
 use serde_json::Value;
@@ -1091,5 +1155,40 @@ mod tests {
         assert_eq!(auth_str, "Bearer secret-token-123");
         let bearer = auth_str.strip_prefix("Bearer ").unwrap();
         assert_eq!(bearer.trim(), token.as_str());
+    }
+
+    #[tokio::test]
+    async fn test_rehydrate_from_raw_lines() {
+        let updates = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = TestAdapter {
+            updates: updates.clone(),
+        };
+        let state = ApiState::new(vec![Box::new(adapter)], 0);
+
+        let sample_tmux_output = "%4\tbusy\n%21\tidle\n%23\t\n%27\tquestion\n%30\tpermission\n%31\terror\n";
+        state.rehydrate_from_raw_lines(sample_tmux_output, 12345).await;
+
+        let pane_states = state.pane_states.lock().await;
+        assert_eq!(pane_states.len(), 5);
+        assert_eq!(pane_states.get("%4").unwrap().state, AgentState::Working);
+        assert_eq!(pane_states.get("%21").unwrap().state, AgentState::Idle);
+        assert!(!pane_states.contains_key("%23"));
+        assert_eq!(pane_states.get("%27").unwrap().state, AgentState::AwaitingInput);
+        assert_eq!(pane_states.get("%30").unwrap().state, AgentState::Permission);
+        assert_eq!(pane_states.get("%31").unwrap().state, AgentState::Error);
+    }
+
+    #[test]
+    fn test_from_tmux_raw() {
+        assert_eq!(AgentState::from_tmux_raw("busy"), Some(AgentState::Working));
+        assert_eq!(AgentState::from_tmux_raw("working"), Some(AgentState::Working));
+        assert_eq!(AgentState::from_tmux_raw("question"), Some(AgentState::AwaitingInput));
+        assert_eq!(AgentState::from_tmux_raw("awaiting_input"), Some(AgentState::AwaitingInput));
+        assert_eq!(AgentState::from_tmux_raw("permission"), Some(AgentState::Permission));
+        assert_eq!(AgentState::from_tmux_raw("error"), Some(AgentState::Error));
+        assert_eq!(AgentState::from_tmux_raw("idle"), Some(AgentState::Idle));
+        assert_eq!(AgentState::from_tmux_raw(""), None);
+        assert_eq!(AgentState::from_tmux_raw("   "), None);
+        assert_eq!(AgentState::from_tmux_raw("other_junk"), None);
     }
 }

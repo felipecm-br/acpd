@@ -42,6 +42,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         config.idle_debounce_ms.unwrap_or(650),
     );
 
+    adapters.rehydrate_from_tmux().await;
+
     let cleanup_state = adapters.clone();
     let mut cleanup_shutdown_rx = shutdown_rx.clone();
     tokio::spawn(async move {
