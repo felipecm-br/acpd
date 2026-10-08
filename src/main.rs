@@ -11,6 +11,56 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Fast-path CLI queries (zero-tracing, sub-millisecond return)
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("acpd {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "acpd {}\nAutonomous Cockpit Protocol Daemon\n\n\
+USAGE:\n    acpd [OPTIONS] [COMMAND]\n\n\
+OPTIONS:\n    -c, --config <FILE>    Custom path to config.toml\n    \
+-h, --help             Print help information\n    \
+-V, --version          Print version information\n\n\
+COMMANDS:\n    \
+health                 Check health status of running daemon",
+            env!("CARGO_PKG_VERSION")
+        );
+        return Ok(());
+    }
+
+    if args.get(1).map(|s| s.as_str()) == Some("health") {
+        match tokio::net::TcpStream::connect("127.0.0.1:4040").await {
+            Ok(mut stream) => {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let req = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:4040\r\nConnection: close\r\n\r\n";
+                if stream.write_all(req).await.is_ok() {
+                    let mut resp = Vec::new();
+                    let _ = stream.read_to_end(&mut resp).await;
+                    let resp_str = String::from_utf8_lossy(&resp);
+                    if resp_str.contains("200 OK") {
+                        if let Some(body) = resp_str.split("\r\n\r\n").nth(1) {
+                            println!("{}", body.trim());
+                        } else {
+                            println!("healthy");
+                        }
+                        return Ok(());
+                    }
+                }
+                eprintln!("unhealthy: unexpected response from acpd");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("acpd is not running or unreachable on port 4040: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // 1. Initialize logging (tracing)
     tracing_subscriber::registry()
         .with(
@@ -23,12 +73,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting ACP Daemon (acpd)...");
 
     // 2. Parse arguments and resolve config path
-    let args: Vec<String> = std::env::args().collect();
     let mut config_path = None;
-    for i in 0..args.len() {
-        if args[i] == "--config" && i + 1 < args.len() {
-            config_path = Some(args[i + 1].clone());
-            break;
+    let mut iter = args.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if arg == "--config" || arg == "-c" {
+            config_path = iter.next().cloned();
+        } else if let Some(stripped) = arg.strip_prefix("--config=") {
+            config_path = Some(stripped.to_string());
         }
     }
 
