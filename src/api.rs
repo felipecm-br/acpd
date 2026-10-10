@@ -499,6 +499,41 @@ pub struct StatusResponse {
     pub success: bool,
 }
 
+fn log_flow_event(event: &str, target: &str, extra: &str) {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/fecavmi".to_string());
+    let script = format!("{}/.config/tmux/flow-log.sh", home);
+    let event = event.to_string();
+    let target = target.to_string();
+    let extra = extra.to_string();
+
+    tokio::spawn(async move {
+        if std::path::Path::new(&script).exists() {
+            let _ = tokio::process::Command::new(&script)
+                .args([&event, &target, &extra])
+                .output()
+                .await;
+        } else {
+            let log_dir = format!("{}/.local/state/flow", home);
+            let _ = tokio::fs::create_dir_all(&log_dir).await;
+            let log_path = format!("{}/events.tsv", log_dir);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let line = format!("{}\t{}\t{}\t{}\n", now, event, target, extra);
+            use tokio::io::AsyncWriteExt;
+            if let Ok(mut f) = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .await
+            {
+                let _ = f.write_all(line.as_bytes()).await;
+            }
+        }
+    });
+}
+
 #[derive(Debug, Clone)]
 pub struct IncomingUpdate {
     pub pane_id: String,
@@ -512,7 +547,7 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
         .next_seq
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    {
+    let (prev_state, should_proceed) = {
         let mut states = state.pane_states.lock().await;
         if let Some(existing) = states.get(&update.pane_id)
             && matches!(update.timestamp, Some(ts) if ts < existing.last_timestamp)
@@ -523,17 +558,43 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
                 update.timestamp,
                 existing.last_timestamp
             );
-            return;
+            (None, false)
+        } else {
+            let prev = states.get(&update.pane_id).map(|s| s.state.clone());
+            states.insert(
+                update.pane_id.clone(),
+                PaneStateInfo {
+                    last_timestamp: update.timestamp.unwrap_or(0),
+                    seq_id: seq,
+                    state: update.state.clone(),
+                    message: update.message.clone(),
+                },
+            );
+            (prev, true)
         }
-        states.insert(
-            update.pane_id.clone(),
-            PaneStateInfo {
-                last_timestamp: update.timestamp.unwrap_or(0),
-                seq_id: seq,
-                state: update.state.clone(),
-                message: update.message.clone(),
-            },
-        );
+    };
+
+    if !should_proceed {
+        return;
+    }
+
+    // Telemetry instrumentation: measure human response latency
+    match (&prev_state, &update.state) {
+        // Agent asks question / requests permission
+        (prev, AgentState::AwaitingInput) if prev != &Some(AgentState::AwaitingInput) => {
+            log_flow_event("agent_question", &update.pane_id, "");
+        }
+        (prev, AgentState::Permission) if prev != &Some(AgentState::Permission) => {
+            log_flow_event("agent_question", &update.pane_id, "");
+        }
+        // Human answered question (transitioned from question/permission to working or idle)
+        (Some(AgentState::AwaitingInput), AgentState::Working)
+        | (Some(AgentState::AwaitingInput), AgentState::Idle)
+        | (Some(AgentState::Permission), AgentState::Working)
+        | (Some(AgentState::Permission), AgentState::Idle) => {
+            log_flow_event("human_reply", &update.pane_id, "");
+        }
+        _ => {}
     }
 
     if update.state == AgentState::Working {
@@ -567,6 +628,7 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
         let pane_states = state.pane_states.clone();
         let broadcast_tx = state.state_broadcast.clone();
         let delay_ms = state.idle_debounce_ms;
+        let prev_state_for_idle = prev_state.clone();
 
         let task = tokio::spawn(async move {
             if delay_ms > 0 {
@@ -577,6 +639,9 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
                 if states.get(&pane_id).is_some_and(|c| c.seq_id != seq) {
                     return;
                 }
+            }
+            if prev_state_for_idle == Some(AgentState::Working) {
+                log_flow_event("agent_finished", &pane_id, "");
             }
             for adapter in adapters.iter() {
                 if let Err(e) = adapter.update(&update_clone).await {
