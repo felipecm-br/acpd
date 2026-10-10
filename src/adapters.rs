@@ -13,6 +13,7 @@ pub enum AgentState {
     Working,
     AwaitingInput,
     Permission,
+    Stalled,
     Error,
     Closed,
 }
@@ -24,6 +25,7 @@ impl AgentState {
             AgentState::Working => "working",
             AgentState::AwaitingInput => "awaiting_input",
             AgentState::Permission => "permission",
+            AgentState::Stalled => "stalled",
             AgentState::Error => "error",
             AgentState::Closed => "closed",
         }
@@ -34,6 +36,7 @@ impl AgentState {
             "busy" | "working" => Some(AgentState::Working),
             "question" | "awaiting_input" => Some(AgentState::AwaitingInput),
             "permission" => Some(AgentState::Permission),
+            "stalled" | "hanging" => Some(AgentState::Stalled),
             "error" => Some(AgentState::Error),
             "idle" => Some(AgentState::Idle),
             _ => None,
@@ -50,10 +53,11 @@ impl std::str::FromStr for AgentState {
             "working" => Ok(AgentState::Working),
             "awaiting_input" => Ok(AgentState::AwaitingInput),
             "permission" => Ok(AgentState::Permission),
+            "stalled" | "hanging" => Ok(AgentState::Stalled),
             "error" => Ok(AgentState::Error),
             "closed" => Ok(AgentState::Closed),
             invalid => Err(format!(
-                "Invalid params: Unknown agent state '{}'. Expected one of: working, idle, awaiting_input, permission, error, closed.",
+                "Invalid params: Unknown agent state '{}'. Expected one of: working, idle, awaiting_input, permission, stalled, error, closed.",
                 invalid
             )),
         }
@@ -101,6 +105,7 @@ impl OutputAdapter for WaybarAdapter {
             AgentState::Working => ("busy", "Agent Working"),
             AgentState::AwaitingInput => ("question", "Awaiting Input"),
             AgentState::Permission => ("permission", "Permission Required"),
+            AgentState::Stalled => ("stalled", "Agent Stalled / Hanging"),
             AgentState::Error => ("error", "Agent Error"),
             AgentState::Closed => ("idle", "Agent Closed"),
         };
@@ -113,9 +118,13 @@ impl OutputAdapter for WaybarAdapter {
             let (icon, color) = if let Some(theme) = &self.theme {
                 if let Some(state_theme) = theme.states.get(raw_state) {
                     (state_theme.icon.clone(), state_theme.color.clone())
+                } else if raw_state == "stalled" {
+                    ("󱥁".to_string(), "#fab387".to_string())
                 } else {
                     ("".to_string(), "#ffffff".to_string())
                 }
+            } else if raw_state == "stalled" {
+                ("󱥁".to_string(), "#fab387".to_string())
             } else {
                 ("".to_string(), "#ffffff".to_string())
             };
@@ -486,6 +495,18 @@ impl OutputAdapter for TmuxAdapter {
                             .unwrap_or(&default_theme);
                         (t.icon.clone(), t.color.clone(), "permission")
                     }
+                    AgentState::Stalled => {
+                        let t = self
+                            .theme
+                            .as_ref()
+                            .and_then(|th| th.states.get("stalled"))
+                            .cloned()
+                            .unwrap_or(AgentStateTheme {
+                                icon: "󱥁".to_string(),
+                                color: "#fab387".to_string(),
+                            });
+                        (t.icon, t.color, "stalled")
+                    }
                     AgentState::Error => {
                         let t = self
                             .theme
@@ -506,6 +527,7 @@ impl OutputAdapter for TmuxAdapter {
                 let (action_msg, force_bell) = match state {
                     AgentState::AwaitingInput => (Some("󱜻 question"), true),
                     AgentState::Permission => (Some("󱅭 permission"), true),
+                    AgentState::Stalled => (Some("󱥁 stalled"), true),
                     _ => (None, false),
                 };
 
@@ -721,7 +743,8 @@ impl OutputAdapter for SoundAdapter {
             // When agent transitions from Working (or active state) to Idle -> AI response finished!
             (Some(AgentState::Working), AgentState::Idle)
             | (Some(AgentState::AwaitingInput), AgentState::Idle)
-            | (Some(AgentState::Permission), AgentState::Idle) => {
+            | (Some(AgentState::Permission), AgentState::Idle)
+            | (Some(AgentState::Stalled), AgentState::Idle) => {
                 self.play("response");
             }
             // When agent transitions to AwaitingInput -> AI asking question / input
@@ -731,6 +754,10 @@ impl OutputAdapter for SoundAdapter {
             // When agent transitions to Permission -> AI asking permission
             (_, AgentState::Permission) if prev_state != Some(AgentState::Permission) => {
                 self.play("permission");
+            }
+            // When agent transitions to Stalled
+            (_, AgentState::Stalled) if prev_state != Some(AgentState::Stalled) => {
+                self.play("error");
             }
             // When agent transitions to Error
             (_, AgentState::Error) if prev_state != Some(AgentState::Error) => {
@@ -841,4 +868,14 @@ mod tests {
         };
         assert!(adapter.update(&update_closed).await.is_ok());
     }
+
+    #[test]
+    fn test_stalled_agent_state_parsing() {
+        assert_eq!("stalled".parse::<AgentState>(), Ok(AgentState::Stalled));
+        assert_eq!("hanging".parse::<AgentState>(), Ok(AgentState::Stalled));
+        assert_eq!(AgentState::from_tmux_raw("stalled"), Some(AgentState::Stalled));
+        assert_eq!(AgentState::from_tmux_raw("hanging"), Some(AgentState::Stalled));
+        assert_eq!(AgentState::Stalled.as_str(), "stalled");
+    }
 }
+

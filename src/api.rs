@@ -11,6 +11,13 @@ pub struct PaneStateInfo {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StallRecord {
+    pub last_output_snapshot: String,
+    pub last_cpu_ticks: u64,
+    pub last_activity_instant: tokio::time::Instant,
+}
+
 #[derive(Clone)]
 pub struct ApiState {
     pub adapters: Arc<Vec<Box<dyn OutputAdapter>>>,
@@ -19,16 +26,21 @@ pub struct ApiState {
     pub idle_debounce_ms: u64,
     pub pane_states: Arc<tokio::sync::Mutex<std::collections::HashMap<String, PaneStateInfo>>>,
     pub next_seq: Arc<std::sync::atomic::AtomicU64>,
+    pub state_broadcast: tokio::sync::broadcast::Sender<AgentUpdate>,
+    pub stall_records: Arc<tokio::sync::Mutex<std::collections::HashMap<String, StallRecord>>>,
 }
 
 impl ApiState {
     pub fn new(adapters: Vec<Box<dyn OutputAdapter>>, idle_debounce_ms: u64) -> Self {
+        let (state_broadcast, _) = tokio::sync::broadcast::channel(128);
         Self {
             adapters: Arc::new(adapters),
             pending_idles: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             idle_debounce_ms,
             pane_states: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             next_seq: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            state_broadcast,
+            stall_records: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -75,9 +87,15 @@ impl ApiState {
                     }
                 }
 
+                let _ = self.state_broadcast.send(update);
+
                 {
                     let mut states = self.pane_states.lock().await;
                     states.remove(&pane_id);
+                }
+                {
+                    let mut stalls = self.stall_records.lock().await;
+                    stalls.remove(&pane_id);
                 }
             }
         }
@@ -124,6 +142,7 @@ impl ApiState {
                         tracing::warn!("Adapter rehydrate error for pane {}: {}", pane_id, e);
                     }
                 }
+                let _ = self.state_broadcast.send(update.clone());
                 tracing::info!("Rehydrated pane {} with state {:?}", pane_id, update.state);
             }
         }
@@ -146,6 +165,171 @@ impl ApiState {
 
         self.rehydrate_from_raw_lines(&output, now_secs).await;
     }
+
+    pub async fn check_pane_stalls(&self) {
+        let target_panes: Vec<(String, AgentState)> = {
+            let states = self.pane_states.lock().await;
+            states
+                .iter()
+                .filter_map(|(pane_id, info)| {
+                    if info.state == AgentState::Working || info.state == AgentState::Stalled {
+                        Some((pane_id.clone(), info.state.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if target_panes.is_empty() {
+            return;
+        }
+
+        for (pane_id, current_state) in target_panes {
+            let display_out = tokio::process::Command::new("tmux")
+                .args([
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &pane_id,
+                    "#{pane_pid} #{cursor_x} #{cursor_y} #{history_size}",
+                ])
+                .output()
+                .await;
+
+            let (pane_pid, cursor_info) = match display_out {
+                Ok(o) if o.status.success() => {
+                    let out_str = String::from_utf8_lossy(&o.stdout);
+                    let mut parts = out_str.split_whitespace();
+                    let pid = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+                    let rest = parts.collect::<Vec<&str>>().join(":");
+                    (pid, rest)
+                }
+                _ => continue,
+            };
+
+            let capture_out = tokio::process::Command::new("tmux")
+                .args(["capture-pane", "-p", "-t", &pane_id, "-S", "-5"])
+                .output()
+                .await;
+
+            let text_snapshot = match capture_out {
+                Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+                _ => String::new(),
+            };
+
+            let current_snapshot = format!("{}:{}", cursor_info, text_snapshot);
+            let current_cpu = if pane_pid > 0 {
+                get_process_tree_cpu_ticks(pane_pid)
+            } else {
+                0
+            };
+
+            let mut to_dispatch: Option<IncomingUpdate> = None;
+
+            {
+                let mut stalls = self.stall_records.lock().await;
+                let record = stalls.entry(pane_id.clone()).or_insert_with(|| StallRecord {
+                    last_output_snapshot: current_snapshot.clone(),
+                    last_cpu_ticks: current_cpu,
+                    last_activity_instant: tokio::time::Instant::now(),
+                });
+
+                let output_changed = record.last_output_snapshot != current_snapshot;
+                let cpu_changed = current_cpu > record.last_cpu_ticks;
+
+                if output_changed || cpu_changed {
+                    record.last_output_snapshot = current_snapshot;
+                    record.last_cpu_ticks = current_cpu;
+                    record.last_activity_instant = tokio::time::Instant::now();
+
+                    if current_state == AgentState::Stalled {
+                        tracing::info!("Pane {} resumed activity; recovering from Stalled to Working", pane_id);
+                        to_dispatch = Some(IncomingUpdate {
+                            pane_id: pane_id.clone(),
+                            state: AgentState::Working,
+                            message: Some("recovered from stall".into()),
+                            timestamp: None,
+                        });
+                    }
+                } else if current_state == AgentState::Working
+                    && record.last_activity_instant.elapsed() >= std::time::Duration::from_secs(20)
+                {
+                    tracing::warn!(
+                        "Pane {} stalled (>20s silence and 0 CPU delta). Transitioning to Stalled.",
+                        pane_id
+                    );
+                    to_dispatch = Some(IncomingUpdate {
+                        pane_id: pane_id.clone(),
+                        state: AgentState::Stalled,
+                        message: Some("agent stalled (no output / CPU for 20s)".into()),
+                        timestamp: None,
+                    });
+                }
+            }
+
+            if let Some(update) = to_dispatch {
+                dispatch_update(self, update).await;
+            }
+        }
+    }
+}
+
+fn get_process_tree_cpu_ticks(root_pid: u32) -> u64 {
+    let mut ppid_map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let mut ticks_map: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let pid_str = match file_name.to_str() {
+                Some(s) if s.chars().all(|c| c.is_ascii_digit()) => s,
+                _ => continue,
+            };
+            let pid: u32 = match pid_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let stat_path = format!("/proc/{}/stat", pid);
+            if let Ok(content) = std::fs::read_to_string(stat_path) {
+                if let Some(rparen) = content.rfind(')') {
+                    let rest = &content[rparen + 1..];
+                    let fields: Vec<&str> = rest.split_whitespace().collect();
+                    if fields.len() > 13 {
+                        if let (Ok(ppid), Ok(utime), Ok(stime)) = (
+                            fields[1].parse::<u32>(),
+                            fields[11].parse::<u64>(),
+                            fields[12].parse::<u64>(),
+                        ) {
+                            ppid_map.entry(ppid).or_default().push(pid);
+                            ticks_map.insert(pid, utime.saturating_add(stime));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut total_ticks: u64 = 0;
+    let mut queue = vec![root_pid];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(curr) = queue.pop() {
+        if !visited.insert(curr) {
+            continue;
+        }
+        if let Some(&ticks) = ticks_map.get(&curr) {
+            total_ticks = total_ticks.saturating_add(ticks);
+        }
+        if let Some(children) = ppid_map.get(&curr) {
+            for &child in children {
+                queue.push(child);
+            }
+        }
+    }
+
+    total_ticks
 }
 
 use serde_json::Value;
@@ -165,6 +349,21 @@ pub struct StateUpdateParams {
     pub state: String,
     pub pane_id: String,
     pub timestamp: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct DismissParams {
+    pub pane_id: Option<String>,
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct WaitParams {
+    pub pane_id: String,
+    pub target_state: Option<String>,
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -337,6 +536,21 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
         );
     }
 
+    if update.state == AgentState::Working {
+        let mut stalls = state.stall_records.lock().await;
+        stalls.insert(
+            update.pane_id.clone(),
+            StallRecord {
+                last_output_snapshot: String::new(),
+                last_cpu_ticks: 0,
+                last_activity_instant: tokio::time::Instant::now(),
+            },
+        );
+    } else if update.state != AgentState::Stalled {
+        let mut stalls = state.stall_records.lock().await;
+        stalls.remove(&update.pane_id);
+    }
+
     if update.state == AgentState::Idle {
         let mut pending = state.pending_idles.lock().await;
         if let Some(task) = pending.remove(&update.pane_id) {
@@ -351,6 +565,7 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
         let pane_id = update.pane_id.clone();
         let pending_map = state.pending_idles.clone();
         let pane_states = state.pane_states.clone();
+        let broadcast_tx = state.state_broadcast.clone();
         let delay_ms = state.idle_debounce_ms;
 
         let task = tokio::spawn(async move {
@@ -368,6 +583,7 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
                     tracing::error!("Adapter error: {}", e);
                 }
             }
+            let _ = broadcast_tx.send(update_clone);
             let mut pending = pending_map.lock().await;
             pending.remove(&pane_id);
         });
@@ -389,6 +605,7 @@ async fn dispatch_update(state: &ApiState, update: IncomingUpdate) {
                 tracing::error!("Adapter error: {}", e);
             }
         }
+        let _ = state.state_broadcast.send(agent_update);
     }
 }
 
@@ -445,6 +662,222 @@ async fn handle_rpc(
                 id: payload.id,
             })
         }
+        "agentState/dismiss" | "agent_state/dismiss" => {
+            match parse_rpc_params::<DismissParams>(payload.params) {
+                Ok(params) => {
+                    let pane_id = params.pane_id.or(params.target).unwrap_or_default();
+                    if pane_id.is_empty() {
+                        return Json(RpcResponse::Error {
+                            jsonrpc: "2.0".into(),
+                            error: RpcError {
+                                code: -32602,
+                                message: "Missing pane_id parameter".into(),
+                            },
+                            id: payload.id,
+                        });
+                    }
+
+                    let current_state = {
+                        let states = adapters.pane_states.lock().await;
+                        states.get(&pane_id).map(|s| s.state.clone())
+                    };
+
+                    match current_state {
+                        Some(AgentState::AwaitingInput)
+                        | Some(AgentState::Permission)
+                        | Some(AgentState::Stalled)
+                        | Some(AgentState::Error) => {
+                            tracing::info!("Dismissing attention state for pane {}", pane_id);
+                            dispatch_update(
+                                &adapters,
+                                IncomingUpdate {
+                                    pane_id: pane_id.clone(),
+                                    state: AgentState::Idle,
+                                    message: Some("dismissed by user focus".into()),
+                                    timestamp: None,
+                                },
+                            )
+                            .await;
+
+                            let _ = tokio::process::Command::new("tmux")
+                                .args(["set", "-g", "@ai_agent_bell", ""])
+                                .output()
+                                .await;
+                            let _ = tokio::process::Command::new("tmux")
+                                .args(["refresh-client", "-S"])
+                                .output()
+                                .await;
+
+                            Json(RpcResponse::Success {
+                                jsonrpc: "2.0".into(),
+                                result: serde_json::json!({
+                                    "status": "dismissed",
+                                    "pane_id": pane_id,
+                                }),
+                                id: payload.id,
+                            })
+                        }
+                        Some(AgentState::Working) => Json(RpcResponse::Success {
+                            jsonrpc: "2.0".into(),
+                            result: serde_json::json!({
+                                "status": "ignored",
+                                "pane_id": pane_id,
+                                "reason": "agent_working",
+                            }),
+                            id: payload.id,
+                        }),
+                        _ => {
+                            let _ = tokio::process::Command::new("tmux")
+                                .args(["set", "-g", "@ai_agent_bell", ""])
+                                .output()
+                                .await;
+                            Json(RpcResponse::Success {
+                                jsonrpc: "2.0".into(),
+                                result: serde_json::json!({
+                                    "status": "noop",
+                                    "pane_id": pane_id,
+                                }),
+                                id: payload.id,
+                            })
+                        }
+                    }
+                }
+                Err(e) => json_invalid_params(e, payload.id),
+            }
+        }
+        "agentState/wait" | "agent_state/wait" => match parse_rpc_params::<WaitParams>(payload.params) {
+            Ok(params) => {
+                if params.pane_id.is_empty() {
+                    return Json(RpcResponse::Error {
+                        jsonrpc: "2.0".into(),
+                        error: RpcError {
+                            code: -32602,
+                            message: "Missing pane_id parameter".into(),
+                        },
+                        id: payload.id,
+                    });
+                }
+
+                let target_state = match params
+                    .target_state
+                    .as_deref()
+                    .unwrap_or("idle")
+                    .parse::<AgentState>()
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        return Json(RpcResponse::Error {
+                            jsonrpc: "2.0".into(),
+                            error: RpcError {
+                                code: -32602,
+                                message: format!("Invalid target_state: {}", e),
+                            },
+                            id: payload.id,
+                        });
+                    }
+                };
+
+                // Check if current state already matches target_state
+                {
+                    let states = adapters.pane_states.lock().await;
+                    if let Some(info) = states.get(&params.pane_id) {
+                        if info.state == target_state {
+                            return Json(RpcResponse::Success {
+                                jsonrpc: "2.0".into(),
+                                result: serde_json::json!({
+                                    "status": "reached",
+                                    "pane_id": params.pane_id,
+                                    "state": target_state.as_str(),
+                                }),
+                                id: payload.id,
+                            });
+                        }
+                    } else if target_state == AgentState::Idle {
+                        return Json(RpcResponse::Success {
+                            jsonrpc: "2.0".into(),
+                            result: serde_json::json!({
+                                "status": "reached",
+                                "pane_id": params.pane_id,
+                                "state": "idle",
+                            }),
+                            id: payload.id,
+                        });
+                    }
+                }
+
+                let mut rx = adapters.state_broadcast.subscribe();
+                let pane_id = params.pane_id.clone();
+                let timeout_secs = params.timeout_secs.unwrap_or(300);
+
+                let wait_fut = async {
+                    loop {
+                        match rx.recv().await {
+                            Ok(update) => {
+                                if update.pane_id == pane_id {
+                                    if update.state == target_state {
+                                        return Ok(("reached", update.state.as_str().to_string()));
+                                    } else if update.state == AgentState::Closed {
+                                        return Ok(("closed", "closed".to_string()));
+                                    }
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                let states = adapters.pane_states.lock().await;
+                                if let Some(info) = states.get(&pane_id) {
+                                    if info.state == target_state {
+                                        return Ok(("reached", target_state.as_str().to_string()));
+                                    } else if info.state == AgentState::Closed {
+                                        return Ok(("closed", "closed".to_string()));
+                                    }
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                return Err("Broadcast channel closed".to_string());
+                            }
+                        }
+                    }
+                };
+
+                match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), wait_fut).await {
+                    Ok(Ok((status, state_str))) => Json(RpcResponse::Success {
+                        jsonrpc: "2.0".into(),
+                        result: serde_json::json!({
+                            "status": status,
+                            "pane_id": pane_id,
+                            "state": state_str,
+                        }),
+                        id: payload.id,
+                    }),
+                    Ok(Err(err)) => Json(RpcResponse::Error {
+                        jsonrpc: "2.0".into(),
+                        error: RpcError {
+                            code: -32000,
+                            message: err,
+                        },
+                        id: payload.id,
+                    }),
+                    Err(_) => {
+                        let current_state = {
+                            let states = adapters.pane_states.lock().await;
+                            states
+                                .get(&pane_id)
+                                .map(|s| s.state.as_str().to_string())
+                                .unwrap_or_else(|| "unknown".into())
+                        };
+                        Json(RpcResponse::Success {
+                            jsonrpc: "2.0".into(),
+                            result: serde_json::json!({
+                                "status": "timeout",
+                                "pane_id": pane_id,
+                                "current_state": current_state,
+                            }),
+                            id: payload.id,
+                        })
+                    }
+                }
+            }
+            Err(e) => json_invalid_params(e, payload.id),
+        },
         "tmux.split_pane" => {
             match serde_json::from_value::<SplitPaneParams>(payload.params) {
                 Ok(params) => {
@@ -1185,10 +1618,96 @@ mod tests {
         assert_eq!(AgentState::from_tmux_raw("question"), Some(AgentState::AwaitingInput));
         assert_eq!(AgentState::from_tmux_raw("awaiting_input"), Some(AgentState::AwaitingInput));
         assert_eq!(AgentState::from_tmux_raw("permission"), Some(AgentState::Permission));
+        assert_eq!(AgentState::from_tmux_raw("stalled"), Some(AgentState::Stalled));
+        assert_eq!(AgentState::from_tmux_raw("hanging"), Some(AgentState::Stalled));
         assert_eq!(AgentState::from_tmux_raw("error"), Some(AgentState::Error));
         assert_eq!(AgentState::from_tmux_raw("idle"), Some(AgentState::Idle));
         assert_eq!(AgentState::from_tmux_raw(""), None);
         assert_eq!(AgentState::from_tmux_raw("   "), None);
         assert_eq!(AgentState::from_tmux_raw("other_junk"), None);
+    }
+
+    #[tokio::test]
+    async fn test_agent_state_dismiss_and_wait() {
+        let updates = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = TestAdapter {
+            updates: updates.clone(),
+        };
+        let state = ApiState::new(vec![Box::new(adapter)], 0);
+
+        // 1. Set pane to AwaitingInput
+        dispatch_update(
+            &state,
+            IncomingUpdate {
+                pane_id: "%1".to_string(),
+                state: AgentState::AwaitingInput,
+                message: None,
+                timestamp: Some(100),
+            },
+        )
+        .await;
+
+        // Dismiss attention
+        let dismiss_req = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "agentState/dismiss".to_string(),
+            params: serde_json::json!({ "pane_id": "%1" }),
+            id: 1,
+        };
+        let res = handle_rpc(State(state.clone()), Json(dismiss_req)).await;
+        match res.0 {
+            RpcResponse::Success { result, .. } => {
+                assert_eq!(result.get("status").unwrap(), "dismissed");
+            }
+            _ => panic!("Expected dismiss success"),
+        }
+
+        // Verify state is now Idle
+        {
+            let states = state.pane_states.lock().await;
+            assert_eq!(states.get("%1").unwrap().state, AgentState::Idle);
+        }
+
+        // 2. Wait for idle when already idle should return immediately
+        let wait_req = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "agentState/wait".to_string(),
+            params: serde_json::json!({ "pane_id": "%1", "target_state": "idle", "timeout_secs": 1 }),
+            id: 2,
+        };
+        let wait_res = handle_rpc(State(state.clone()), Json(wait_req)).await;
+        match wait_res.0 {
+            RpcResponse::Success { result, .. } => {
+                assert_eq!(result.get("status").unwrap(), "reached");
+                assert_eq!(result.get("state").unwrap(), "idle");
+            }
+            _ => panic!("Expected wait success"),
+        }
+
+        // 3. When working, dismiss should be ignored
+        dispatch_update(
+            &state,
+            IncomingUpdate {
+                pane_id: "%1".to_string(),
+                state: AgentState::Working,
+                message: None,
+                timestamp: Some(200),
+            },
+        )
+        .await;
+
+        let dismiss_working_req = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "agentState/dismiss".to_string(),
+            params: serde_json::json!({ "pane_id": "%1" }),
+            id: 3,
+        };
+        let dis_work_res = handle_rpc(State(state.clone()), Json(dismiss_working_req)).await;
+        match dis_work_res.0 {
+            RpcResponse::Success { result, .. } => {
+                assert_eq!(result.get("status").unwrap(), "ignored");
+            }
+            _ => panic!("Expected dismiss ignored"),
+        }
     }
 }

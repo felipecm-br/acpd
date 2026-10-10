@@ -60,6 +60,22 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         }
     });
 
+    let stall_state = adapters.clone();
+    let mut stall_shutdown_rx = shutdown_rx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = stall_shutdown_rx.changed() => break,
+                _ = interval.tick() => {
+                    stall_state.check_pane_stalls().await;
+                }
+            }
+        }
+    });
+
     let token = Arc::new(crate::auth::generate_and_save_token()?);
 
     let app = axum::Router::new()
