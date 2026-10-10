@@ -48,10 +48,10 @@ impl std::str::FromStr for AgentState {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "idle" => Ok(AgentState::Idle),
-            "working" => Ok(AgentState::Working),
-            "awaiting_input" => Ok(AgentState::AwaitingInput),
+            "working" | "busy" => Ok(AgentState::Working),
+            "awaiting_input" | "question" => Ok(AgentState::AwaitingInput),
             "permission" => Ok(AgentState::Permission),
             "stalled" | "hanging" => Ok(AgentState::Stalled),
             "error" => Ok(AgentState::Error),
