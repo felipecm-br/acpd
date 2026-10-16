@@ -87,34 +87,60 @@ fn get_waybar_state_path() -> String {
     format!("{}/acpd-waybar-state.json", xdg_runtime)
 }
 
+fn urgency_score(state: &AgentState) -> u8 {
+    match state {
+        AgentState::Permission => 6,
+        AgentState::AwaitingInput => 5,
+        AgentState::Stalled => 4,
+        AgentState::Error => 3,
+        AgentState::Working => 2,
+        AgentState::Idle => 1,
+        AgentState::Closed => 0,
+    }
+}
+
 pub struct WaybarAdapter {
     theme: Option<ThemeConfig>,
+    pane_updates: Arc<Mutex<HashMap<String, AgentUpdate>>>,
 }
 
 impl WaybarAdapter {
     pub fn new(theme: Option<ThemeConfig>) -> Self {
-        Self { theme }
+        Self {
+            theme,
+            pane_updates: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
 #[async_trait]
 impl OutputAdapter for WaybarAdapter {
     async fn update(&self, update: &AgentUpdate) -> anyhow::Result<()> {
-        let (raw_state, tooltip) = match update.state {
-            AgentState::Idle => ("idle", "Agent Idle"),
-            AgentState::Working => ("busy", "Agent Working"),
-            AgentState::AwaitingInput => ("question", "Awaiting Input"),
-            AgentState::Permission => ("permission", "Permission Required"),
-            AgentState::Stalled => ("stalled", "Agent Stalled / Hanging"),
-            AgentState::Error => ("error", "Agent Error"),
-            AgentState::Closed => ("idle", "Agent Closed"),
+        let active_update = {
+            let mut map = self.pane_updates.lock().await;
+            if update.state == AgentState::Closed {
+                map.remove(&update.pane_id);
+            } else {
+                map.insert(update.pane_id.clone(), update.clone());
+            }
+
+            map.values()
+                .filter(|u| u.state != AgentState::Closed && u.state != AgentState::Idle)
+                .max_by_key(|u| urgency_score(&u.state))
+                .cloned()
         };
 
-        if update.state == AgentState::Idle || update.state == AgentState::Closed {
-            // Delete the file on idle to hide the module from waybar
-            let path = get_waybar_state_path();
-            let _ = tokio::fs::remove_file(&path).await;
-        } else {
+        if let Some(active) = active_update {
+            let (raw_state, tooltip) = match active.state {
+                AgentState::Idle => ("idle", "Agent Idle"),
+                AgentState::Working => ("busy", "Agent Working"),
+                AgentState::AwaitingInput => ("question", "Awaiting Input"),
+                AgentState::Permission => ("permission", "Permission Required"),
+                AgentState::Stalled => ("stalled", "Agent Stalled / Hanging"),
+                AgentState::Error => ("error", "Agent Error"),
+                AgentState::Closed => ("idle", "Agent Closed"),
+            };
+
             let (icon, color) = if let Some(theme) = &self.theme {
                 if let Some(state_theme) = theme.states.get(raw_state) {
                     (state_theme.icon.clone(), state_theme.color.clone())
@@ -142,6 +168,11 @@ impl OutputAdapter for WaybarAdapter {
             if let Err(e) = tokio::fs::write(&path, content).await {
                 tracing::error!("Failed to write waybar state file: {}", e);
             }
+            tracing::info!("WaybarAdapter updated to: {}", raw_state);
+        } else {
+            let path = get_waybar_state_path();
+            let _ = tokio::fs::remove_file(&path).await;
+            tracing::info!("WaybarAdapter: All agents idle/closed, cleared waybar state");
         }
 
         // Pkill waybar to trigger custom module update
@@ -153,21 +184,58 @@ impl OutputAdapter for WaybarAdapter {
             tracing::error!("Failed to send signal to waybar: {}", e);
         }
 
-        tracing::info!("WaybarAdapter updated to: {}", raw_state);
         Ok(())
     }
 
     async fn rehydrate(&self, update: &AgentUpdate) -> anyhow::Result<()> {
-        if update.state != AgentState::Idle && update.state != AgentState::Closed {
-            self.update(update).await?;
-        }
-        Ok(())
+        self.update(update).await
     }
 }
 
 // ==========================================
 // TMUX ADAPTER
 // ==========================================
+async fn set_tmux_window_state(pane_id: &str, icon: &str, raw: &str, color: &str) {
+    let out = Command::new("tmux")
+        .args([
+            "set-option", "-w", "-t", pane_id, "@ai_agent_state", icon, ";",
+            "set-option", "-w", "-t", pane_id, "@ai_agent_state_raw", raw, ";",
+            "set-option", "-w", "-t", pane_id, "@ai_agent_state_color", color, ";",
+            "refresh-client", "-S",
+        ])
+        .output()
+        .await;
+    if let Ok(o) = out
+        && !o.status.success()
+    {
+        tracing::warn!(
+            "Tmux set_tmux_window_state failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
+async fn unset_tmux_window_state(pane_id: &str) {
+    let out = Command::new("tmux")
+        .args([
+            "set-option", "-w", "-u", "-t", pane_id, "@ai_agent_state", ";",
+            "set-option", "-w", "-u", "-t", pane_id, "@ai_agent_state_raw", ";",
+            "set-option", "-w", "-u", "-t", pane_id, "@ai_agent_state_color", ";",
+            "refresh-client", "-S",
+        ])
+        .output()
+        .await;
+    if let Ok(o) = out
+        && !o.status.success()
+    {
+        tracing::warn!(
+            "Tmux unset_tmux_window_state failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
+#[allow(dead_code)]
 async fn set_tmux_option(pane_id: &str, option: &str, value: &str) {
     let out = Command::new("tmux")
         .args(["set-option", "-w", "-t", pane_id, option, value])
@@ -184,6 +252,7 @@ async fn set_tmux_option(pane_id: &str, option: &str, value: &str) {
     }
 }
 
+#[allow(dead_code)]
 async fn unset_tmux_option(pane_id: &str, option: &str) {
     let out = Command::new("tmux")
         .args(["set-option", "-w", "-u", "-t", pane_id, option])
@@ -200,6 +269,7 @@ async fn unset_tmux_option(pane_id: &str, option: &str) {
     }
 }
 
+#[allow(dead_code)]
 async fn refresh_tmux_client() {
     let out = Command::new("tmux")
         .args(["refresh-client", "-S"])
@@ -262,18 +332,12 @@ impl TmuxAdapter {
 
         let task = tokio::spawn(async move {
             if frames.is_empty() {
-                set_tmux_option(&pane_clone, "@ai_agent_state", &icon).await;
-                set_tmux_option(&pane_clone, "@ai_agent_state_raw", "busy").await;
-                set_tmux_option(&pane_clone, "@ai_agent_state_color", &color).await;
-                refresh_tmux_client().await;
+                set_tmux_window_state(&pane_clone, &icon, "busy", &color).await;
                 return;
             }
 
             if frames.len() == 1 {
-                set_tmux_option(&pane_clone, "@ai_agent_state", &frames[0]).await;
-                set_tmux_option(&pane_clone, "@ai_agent_state_raw", "busy").await;
-                set_tmux_option(&pane_clone, "@ai_agent_state_color", &color).await;
-                refresh_tmux_client().await;
+                set_tmux_window_state(&pane_clone, &frames[0], "busy", &color).await;
                 return;
             }
 
@@ -282,10 +346,7 @@ impl TmuxAdapter {
             loop {
                 let frame = &frames[i % frames.len()];
 
-                set_tmux_option(&pane_clone, "@ai_agent_state", frame).await;
-                set_tmux_option(&pane_clone, "@ai_agent_state_raw", "busy").await;
-                set_tmux_option(&pane_clone, "@ai_agent_state_color", &color).await;
-                refresh_tmux_client().await;
+                set_tmux_window_state(&pane_clone, frame, "busy", &color).await;
 
                 i += 1;
                 tokio::time::sleep(tokio::time::Duration::from_millis(interval)).await;
@@ -395,8 +456,6 @@ impl OutputAdapter for TmuxAdapter {
             let pane_id = update.pane_id.clone();
 
             let task = tokio::spawn(async move {
-                tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
-
                 // Check deduplication
                 {
                     let mut states = pane_states.lock().await;
@@ -425,10 +484,7 @@ impl OutputAdapter for TmuxAdapter {
                     .and_then(|th| th.states.get("idle"))
                     .unwrap_or(&default_theme);
 
-                set_tmux_option(&pane_id, "@ai_agent_state", &t.icon).await;
-                set_tmux_option(&pane_id, "@ai_agent_state_raw", "idle").await;
-                set_tmux_option(&pane_id, "@ai_agent_state_color", &t.color).await;
-                refresh_tmux_client().await;
+                set_tmux_window_state(&pane_id, &t.icon, "idle", &t.color).await;
 
                 tracing::info!("TmuxAdapter: Debounced update pane {} to Idle", pane_id);
             });
@@ -471,10 +527,7 @@ impl OutputAdapter for TmuxAdapter {
                 let (icon, color, raw) = match state {
                     AgentState::Closed => {
                         // Clear the variables instead of setting them
-                        unset_tmux_option(&update.pane_id, "@ai_agent_state").await;
-                        unset_tmux_option(&update.pane_id, "@ai_agent_state_raw").await;
-                        unset_tmux_option(&update.pane_id, "@ai_agent_state_color").await;
-                        refresh_tmux_client().await;
+                        unset_tmux_window_state(&update.pane_id).await;
                         tracing::info!("TmuxAdapter: Cleared variables for Closed state");
                         return Ok(());
                     }
@@ -518,10 +571,7 @@ impl OutputAdapter for TmuxAdapter {
                     _ => unreachable!(),
                 };
 
-                set_tmux_option(&update.pane_id, "@ai_agent_state", &icon).await;
-                set_tmux_option(&update.pane_id, "@ai_agent_state_raw", raw).await;
-                set_tmux_option(&update.pane_id, "@ai_agent_state_color", &color).await;
-                refresh_tmux_client().await;
+                set_tmux_window_state(&update.pane_id, &icon, raw, &color).await;
 
                 // Trigger a bell based on state
                 let (action_msg, force_bell) = match state {
