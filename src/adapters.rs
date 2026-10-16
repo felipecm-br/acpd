@@ -198,10 +198,29 @@ impl OutputAdapter for WaybarAdapter {
 async fn set_tmux_window_state(pane_id: &str, icon: &str, raw: &str, color: &str) {
     let out = Command::new("tmux")
         .args([
-            "set-option", "-w", "-t", pane_id, "@ai_agent_state", icon, ";",
-            "set-option", "-w", "-t", pane_id, "@ai_agent_state_raw", raw, ";",
-            "set-option", "-w", "-t", pane_id, "@ai_agent_state_color", color, ";",
-            "refresh-client", "-S",
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "@ai_agent_state",
+            icon,
+            ";",
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "@ai_agent_state_raw",
+            raw,
+            ";",
+            "set-option",
+            "-w",
+            "-t",
+            pane_id,
+            "@ai_agent_state_color",
+            color,
+            ";",
+            "refresh-client",
+            "-S",
         ])
         .output()
         .await;
@@ -218,10 +237,29 @@ async fn set_tmux_window_state(pane_id: &str, icon: &str, raw: &str, color: &str
 async fn unset_tmux_window_state(pane_id: &str) {
     let out = Command::new("tmux")
         .args([
-            "set-option", "-w", "-u", "-t", pane_id, "@ai_agent_state", ";",
-            "set-option", "-w", "-u", "-t", pane_id, "@ai_agent_state_raw", ";",
-            "set-option", "-w", "-u", "-t", pane_id, "@ai_agent_state_color", ";",
-            "refresh-client", "-S",
+            "set-option",
+            "-w",
+            "-u",
+            "-t",
+            pane_id,
+            "@ai_agent_state",
+            ";",
+            "set-option",
+            "-w",
+            "-u",
+            "-t",
+            pane_id,
+            "@ai_agent_state_raw",
+            ";",
+            "set-option",
+            "-w",
+            "-u",
+            "-t",
+            pane_id,
+            "@ai_agent_state_color",
+            ";",
+            "refresh-client",
+            "-S",
         ])
         .output()
         .await;
@@ -650,12 +688,14 @@ impl SoundAdapter {
         }
 
         // 1. Check runtime state pointer files first (allows instant hot-switching without restart)
-        let state_pointers = [
+        let mut state_pointers = vec![
             format!("{}/.config/omarchy/sounds/ai-{}.sound", home, event_type),
             format!("{}/.config/acpd/sounds/{}.sound", home, event_type),
-            format!("{}/.config/omarchy/sounds/ai-response.sound", home),
-            format!("{}/.config/acpd/sounds/response.sound", home),
         ];
+        if event_type == "response" {
+            state_pointers.push(format!("{}/.config/omarchy/sounds/ai-response.sound", home));
+            state_pointers.push(format!("{}/.config/acpd/sounds/response.sound", home));
+        }
 
         for pointer in &state_pointers {
             if let Ok(content) = std::fs::read_to_string(pointer) {
@@ -678,12 +718,14 @@ impl SoundAdapter {
         }
 
         // 2. Check direct symlinks/files in user config
-        let direct_files = [
+        let mut direct_files = vec![
             format!("{}/.config/omarchy/sounds/ai-{}.wav", home, event_type),
             format!("{}/.config/omarchy/sounds/ai-{}.oga", home, event_type),
             format!("{}/.config/acpd/sounds/{}.wav", home, event_type),
-            format!("{}/.config/omarchy/sounds/ai-response.wav", home),
         ];
+        if event_type == "response" {
+            direct_files.push(format!("{}/.config/omarchy/sounds/ai-response.wav", home));
+        }
 
         for path in &direct_files {
             if std::path::Path::new(path).is_file() {
@@ -716,7 +758,15 @@ impl SoundAdapter {
         }
 
         // 4. Fallback defaults
+        let default_sound = match event_type {
+            "question" => format!("{}/.local/share/sounds/ai/02-gentle-ping.wav", home),
+            "permission" => format!("{}/.local/share/sounds/ai/06-cyber-pulse.wav", home),
+            "error" => format!("{}/.local/share/sounds/ai/10-arcade-blip.wav", home),
+            _ => format!("{}/.local/share/sounds/ai/01-crystal-chime.wav", home),
+        };
+
         let fallbacks = [
+            default_sound,
             format!("{}/.local/share/sounds/ai/01-crystal-chime.wav", home),
             "/usr/share/sounds/freedesktop/stereo/complete.oga".to_string(),
             "/usr/share/sounds/freedesktop/stereo/message.oga".to_string(),
@@ -923,9 +973,57 @@ mod tests {
     fn test_stalled_agent_state_parsing() {
         assert_eq!("stalled".parse::<AgentState>(), Ok(AgentState::Stalled));
         assert_eq!("hanging".parse::<AgentState>(), Ok(AgentState::Stalled));
-        assert_eq!(AgentState::from_tmux_raw("stalled"), Some(AgentState::Stalled));
-        assert_eq!(AgentState::from_tmux_raw("hanging"), Some(AgentState::Stalled));
+        assert_eq!(
+            AgentState::from_tmux_raw("stalled"),
+            Some(AgentState::Stalled)
+        );
+        assert_eq!(
+            AgentState::from_tmux_raw("hanging"),
+            Some(AgentState::Stalled)
+        );
         assert_eq!(AgentState::Stalled.as_str(), "stalled");
     }
-}
 
+    #[test]
+    fn test_resolve_sound_path_isolation() {
+        let temp_dir = std::env::temp_dir().join(format!("acpd-sound-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let resp_file = temp_dir.join("resp.wav");
+        let quest_file = temp_dir.join("quest.wav");
+        std::fs::write(&resp_file, b"resp").unwrap();
+        std::fs::write(&quest_file, b"quest").unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", &temp_dir);
+        }
+
+        let sound_cfg = SoundConfig {
+            enabled: true,
+            player: Some("pw-play".to_string()),
+            response: Some(resp_file.to_string_lossy().to_string()),
+            question: Some(quest_file.to_string_lossy().to_string()),
+            permission: None,
+            error: None,
+        };
+        let adapter = SoundAdapter::new(Some(sound_cfg));
+
+        // When question is configured, it should resolve to quest_file, NOT fallback to response (resp_file)
+        let resolved_quest = adapter.resolve_sound_path("question");
+        let resolved_resp = adapter.resolve_sound_path("response");
+
+        if let Some(h) = old_home {
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
+        }
+
+        assert_eq!(
+            resolved_quest,
+            Some(quest_file.to_string_lossy().to_string())
+        );
+        assert_eq!(resolved_resp, Some(resp_file.to_string_lossy().to_string()));
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+}

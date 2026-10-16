@@ -150,7 +150,12 @@ impl ApiState {
 
     pub async fn rehydrate_from_tmux(&self) {
         let output = match tokio::process::Command::new("tmux")
-            .args(["list-panes", "-a", "-F", "#{pane_id}\t#{@ai_agent_state_raw}"])
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_id}\t#{@ai_agent_state_raw}",
+            ])
             .output()
             .await
         {
@@ -201,7 +206,10 @@ impl ApiState {
                 Ok(o) if o.status.success() => {
                     let out_str = String::from_utf8_lossy(&o.stdout);
                     let mut parts = out_str.split_whitespace();
-                    let pid = parts.next().and_then(|p| p.parse::<u32>().ok()).unwrap_or(0);
+                    let pid = parts
+                        .next()
+                        .and_then(|p| p.parse::<u32>().ok())
+                        .unwrap_or(0);
                     let rest = parts.collect::<Vec<&str>>().join(":");
                     (pid, rest)
                 }
@@ -229,11 +237,13 @@ impl ApiState {
 
             {
                 let mut stalls = self.stall_records.lock().await;
-                let record = stalls.entry(pane_id.clone()).or_insert_with(|| StallRecord {
-                    last_output_snapshot: current_snapshot.clone(),
-                    last_cpu_ticks: current_cpu,
-                    last_activity_instant: tokio::time::Instant::now(),
-                });
+                let record = stalls
+                    .entry(pane_id.clone())
+                    .or_insert_with(|| StallRecord {
+                        last_output_snapshot: current_snapshot.clone(),
+                        last_cpu_ticks: current_cpu,
+                        last_activity_instant: tokio::time::Instant::now(),
+                    });
 
                 let output_changed = record.last_output_snapshot != current_snapshot;
                 let cpu_changed = current_cpu > record.last_cpu_ticks;
@@ -244,7 +254,10 @@ impl ApiState {
                     record.last_activity_instant = tokio::time::Instant::now();
 
                     if current_state == AgentState::Stalled {
-                        tracing::info!("Pane {} resumed activity; recovering from Stalled to Working", pane_id);
+                        tracing::info!(
+                            "Pane {} resumed activity; recovering from Stalled to Working",
+                            pane_id
+                        );
                         to_dispatch = Some(IncomingUpdate {
                             pane_id: pane_id.clone(),
                             state: AgentState::Working,
@@ -292,20 +305,20 @@ fn get_process_tree_cpu_ticks(root_pid: u32) -> u64 {
             };
 
             let stat_path = format!("/proc/{}/stat", pid);
-            if let Ok(content) = std::fs::read_to_string(stat_path) {
-                if let Some(rparen) = content.rfind(')') {
-                    let rest = &content[rparen + 1..];
-                    let fields: Vec<&str> = rest.split_whitespace().collect();
-                    if fields.len() > 13 {
-                        if let (Ok(ppid), Ok(utime), Ok(stime)) = (
-                            fields[1].parse::<u32>(),
-                            fields[11].parse::<u64>(),
-                            fields[12].parse::<u64>(),
-                        ) {
-                            ppid_map.entry(ppid).or_default().push(pid);
-                            ticks_map.insert(pid, utime.saturating_add(stime));
-                        }
-                    }
+            if let Ok(content) = std::fs::read_to_string(stat_path)
+                && let Some(rparen) = content.rfind(')')
+            {
+                let rest = &content[rparen + 1..];
+                let fields: Vec<&str> = rest.split_whitespace().collect();
+                if fields.len() > 13
+                    && let (Ok(ppid), Ok(utime), Ok(stime)) = (
+                        fields[1].parse::<u32>(),
+                        fields[11].parse::<u64>(),
+                        fields[12].parse::<u64>(),
+                    )
+                {
+                    ppid_map.entry(ppid).or_default().push(pid);
+                    ticks_map.insert(pid, utime.saturating_add(stime));
                 }
             }
         }
@@ -810,139 +823,152 @@ async fn handle_rpc(
                 Err(e) => json_invalid_params(e, payload.id),
             }
         }
-        "agentState/wait" | "agent_state/wait" => match parse_rpc_params::<WaitParams>(payload.params) {
-            Ok(params) => {
-                if params.pane_id.is_empty() {
-                    return Json(RpcResponse::Error {
-                        jsonrpc: "2.0".into(),
-                        error: RpcError {
-                            code: -32602,
-                            message: "Missing pane_id parameter".into(),
-                        },
-                        id: payload.id,
-                    });
-                }
-
-                let target_state = match params
-                    .target_state
-                    .as_deref()
-                    .unwrap_or("idle")
-                    .parse::<AgentState>()
-                {
-                    Ok(s) => s,
-                    Err(e) => {
+        "agentState/wait" | "agent_state/wait" => {
+            match parse_rpc_params::<WaitParams>(payload.params) {
+                Ok(params) => {
+                    if params.pane_id.is_empty() {
                         return Json(RpcResponse::Error {
                             jsonrpc: "2.0".into(),
                             error: RpcError {
                                 code: -32602,
-                                message: format!("Invalid target_state: {}", e),
+                                message: "Missing pane_id parameter".into(),
                             },
                             id: payload.id,
                         });
                     }
-                };
 
-                // Check if current state already matches target_state
-                {
-                    let states = adapters.pane_states.lock().await;
-                    if let Some(info) = states.get(&params.pane_id) {
-                        if info.state == target_state {
+                    let target_state = match params
+                        .target_state
+                        .as_deref()
+                        .unwrap_or("idle")
+                        .parse::<AgentState>()
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return Json(RpcResponse::Error {
+                                jsonrpc: "2.0".into(),
+                                error: RpcError {
+                                    code: -32602,
+                                    message: format!("Invalid target_state: {}", e),
+                                },
+                                id: payload.id,
+                            });
+                        }
+                    };
+
+                    // Check if current state already matches target_state
+                    {
+                        let states = adapters.pane_states.lock().await;
+                        if let Some(info) = states.get(&params.pane_id) {
+                            if info.state == target_state {
+                                return Json(RpcResponse::Success {
+                                    jsonrpc: "2.0".into(),
+                                    result: serde_json::json!({
+                                        "status": "reached",
+                                        "pane_id": params.pane_id,
+                                        "state": target_state.as_str(),
+                                    }),
+                                    id: payload.id,
+                                });
+                            }
+                        } else if target_state == AgentState::Idle {
                             return Json(RpcResponse::Success {
                                 jsonrpc: "2.0".into(),
                                 result: serde_json::json!({
                                     "status": "reached",
                                     "pane_id": params.pane_id,
-                                    "state": target_state.as_str(),
+                                    "state": "idle",
                                 }),
                                 id: payload.id,
                             });
                         }
-                    } else if target_state == AgentState::Idle {
-                        return Json(RpcResponse::Success {
-                            jsonrpc: "2.0".into(),
-                            result: serde_json::json!({
-                                "status": "reached",
-                                "pane_id": params.pane_id,
-                                "state": "idle",
-                            }),
-                            id: payload.id,
-                        });
                     }
-                }
 
-                let mut rx = adapters.state_broadcast.subscribe();
-                let pane_id = params.pane_id.clone();
-                let timeout_secs = params.timeout_secs.unwrap_or(300);
+                    let mut rx = adapters.state_broadcast.subscribe();
+                    let pane_id = params.pane_id.clone();
+                    let timeout_secs = params.timeout_secs.unwrap_or(300);
 
-                let wait_fut = async {
-                    loop {
-                        match rx.recv().await {
-                            Ok(update) => {
-                                if update.pane_id == pane_id {
-                                    if update.state == target_state {
-                                        return Ok(("reached", update.state.as_str().to_string()));
-                                    } else if update.state == AgentState::Closed {
-                                        return Ok(("closed", "closed".to_string()));
+                    let wait_fut = async {
+                        loop {
+                            match rx.recv().await {
+                                Ok(update) => {
+                                    if update.pane_id == pane_id {
+                                        if update.state == target_state {
+                                            return Ok((
+                                                "reached",
+                                                update.state.as_str().to_string(),
+                                            ));
+                                        } else if update.state == AgentState::Closed {
+                                            return Ok(("closed", "closed".to_string()));
+                                        }
                                     }
                                 }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                let states = adapters.pane_states.lock().await;
-                                if let Some(info) = states.get(&pane_id) {
-                                    if info.state == target_state {
-                                        return Ok(("reached", target_state.as_str().to_string()));
-                                    } else if info.state == AgentState::Closed {
-                                        return Ok(("closed", "closed".to_string()));
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    let states = adapters.pane_states.lock().await;
+                                    if let Some(info) = states.get(&pane_id) {
+                                        if info.state == target_state {
+                                            return Ok((
+                                                "reached",
+                                                target_state.as_str().to_string(),
+                                            ));
+                                        } else if info.state == AgentState::Closed {
+                                            return Ok(("closed", "closed".to_string()));
+                                        }
                                     }
                                 }
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                return Err("Broadcast channel closed".to_string());
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                    return Err("Broadcast channel closed".to_string());
+                                }
                             }
                         }
-                    }
-                };
+                    };
 
-                match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), wait_fut).await {
-                    Ok(Ok((status, state_str))) => Json(RpcResponse::Success {
-                        jsonrpc: "2.0".into(),
-                        result: serde_json::json!({
-                            "status": status,
-                            "pane_id": pane_id,
-                            "state": state_str,
-                        }),
-                        id: payload.id,
-                    }),
-                    Ok(Err(err)) => Json(RpcResponse::Error {
-                        jsonrpc: "2.0".into(),
-                        error: RpcError {
-                            code: -32000,
-                            message: err,
-                        },
-                        id: payload.id,
-                    }),
-                    Err(_) => {
-                        let current_state = {
-                            let states = adapters.pane_states.lock().await;
-                            states
-                                .get(&pane_id)
-                                .map(|s| s.state.as_str().to_string())
-                                .unwrap_or_else(|| "unknown".into())
-                        };
-                        Json(RpcResponse::Success {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout_secs),
+                        wait_fut,
+                    )
+                    .await
+                    {
+                        Ok(Ok((status, state_str))) => Json(RpcResponse::Success {
                             jsonrpc: "2.0".into(),
                             result: serde_json::json!({
-                                "status": "timeout",
+                                "status": status,
                                 "pane_id": pane_id,
-                                "current_state": current_state,
+                                "state": state_str,
                             }),
                             id: payload.id,
-                        })
+                        }),
+                        Ok(Err(err)) => Json(RpcResponse::Error {
+                            jsonrpc: "2.0".into(),
+                            error: RpcError {
+                                code: -32000,
+                                message: err,
+                            },
+                            id: payload.id,
+                        }),
+                        Err(_) => {
+                            let current_state = {
+                                let states = adapters.pane_states.lock().await;
+                                states
+                                    .get(&pane_id)
+                                    .map(|s| s.state.as_str().to_string())
+                                    .unwrap_or_else(|| "unknown".into())
+                            };
+                            Json(RpcResponse::Success {
+                                jsonrpc: "2.0".into(),
+                                result: serde_json::json!({
+                                    "status": "timeout",
+                                    "pane_id": pane_id,
+                                    "current_state": current_state,
+                                }),
+                                id: payload.id,
+                            })
+                        }
                     }
                 }
+                Err(e) => json_invalid_params(e, payload.id),
             }
-            Err(e) => json_invalid_params(e, payload.id),
-        },
+        }
         "tmux.split_pane" => {
             match serde_json::from_value::<SplitPaneParams>(payload.params) {
                 Ok(params) => {
@@ -1663,28 +1689,55 @@ mod tests {
         };
         let state = ApiState::new(vec![Box::new(adapter)], 0);
 
-        let sample_tmux_output = "%4\tbusy\n%21\tidle\n%23\t\n%27\tquestion\n%30\tpermission\n%31\terror\n";
-        state.rehydrate_from_raw_lines(sample_tmux_output, 12345).await;
+        let sample_tmux_output =
+            "%4\tbusy\n%21\tidle\n%23\t\n%27\tquestion\n%30\tpermission\n%31\terror\n";
+        state
+            .rehydrate_from_raw_lines(sample_tmux_output, 12345)
+            .await;
 
         let pane_states = state.pane_states.lock().await;
         assert_eq!(pane_states.len(), 5);
         assert_eq!(pane_states.get("%4").unwrap().state, AgentState::Working);
         assert_eq!(pane_states.get("%21").unwrap().state, AgentState::Idle);
         assert!(!pane_states.contains_key("%23"));
-        assert_eq!(pane_states.get("%27").unwrap().state, AgentState::AwaitingInput);
-        assert_eq!(pane_states.get("%30").unwrap().state, AgentState::Permission);
+        assert_eq!(
+            pane_states.get("%27").unwrap().state,
+            AgentState::AwaitingInput
+        );
+        assert_eq!(
+            pane_states.get("%30").unwrap().state,
+            AgentState::Permission
+        );
         assert_eq!(pane_states.get("%31").unwrap().state, AgentState::Error);
     }
 
     #[test]
     fn test_from_tmux_raw() {
         assert_eq!(AgentState::from_tmux_raw("busy"), Some(AgentState::Working));
-        assert_eq!(AgentState::from_tmux_raw("working"), Some(AgentState::Working));
-        assert_eq!(AgentState::from_tmux_raw("question"), Some(AgentState::AwaitingInput));
-        assert_eq!(AgentState::from_tmux_raw("awaiting_input"), Some(AgentState::AwaitingInput));
-        assert_eq!(AgentState::from_tmux_raw("permission"), Some(AgentState::Permission));
-        assert_eq!(AgentState::from_tmux_raw("stalled"), Some(AgentState::Stalled));
-        assert_eq!(AgentState::from_tmux_raw("hanging"), Some(AgentState::Stalled));
+        assert_eq!(
+            AgentState::from_tmux_raw("working"),
+            Some(AgentState::Working)
+        );
+        assert_eq!(
+            AgentState::from_tmux_raw("question"),
+            Some(AgentState::AwaitingInput)
+        );
+        assert_eq!(
+            AgentState::from_tmux_raw("awaiting_input"),
+            Some(AgentState::AwaitingInput)
+        );
+        assert_eq!(
+            AgentState::from_tmux_raw("permission"),
+            Some(AgentState::Permission)
+        );
+        assert_eq!(
+            AgentState::from_tmux_raw("stalled"),
+            Some(AgentState::Stalled)
+        );
+        assert_eq!(
+            AgentState::from_tmux_raw("hanging"),
+            Some(AgentState::Stalled)
+        );
         assert_eq!(AgentState::from_tmux_raw("error"), Some(AgentState::Error));
         assert_eq!(AgentState::from_tmux_raw("idle"), Some(AgentState::Idle));
         assert_eq!(AgentState::from_tmux_raw(""), None);

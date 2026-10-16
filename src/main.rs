@@ -37,7 +37,8 @@ health                 Check health status of running daemon",
         match tokio::net::TcpStream::connect("127.0.0.1:4040").await {
             Ok(mut stream) => {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let req = b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:4040\r\nConnection: close\r\n\r\n";
+                let req =
+                    b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:4040\r\nConnection: close\r\n\r\n";
                 if stream.write_all(req).await.is_ok() {
                     let mut resp = Vec::new();
                     let _ = stream.read_to_end(&mut resp).await;

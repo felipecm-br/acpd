@@ -17,8 +17,7 @@ pub fn get_token_path() -> PathBuf {
     }
 }
 
-pub fn generate_and_save_token() -> anyhow::Result<String> {
-    let token_path = get_token_path();
+pub fn generate_and_save_token_to(token_path: &std::path::Path) -> anyhow::Result<String> {
     if let Some(parent) = token_path.parent() {
         fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -42,12 +41,16 @@ pub fn generate_and_save_token() -> anyhow::Result<String> {
     #[cfg(unix)]
     options.mode(0o600);
 
-    let mut token_file = options.open(&token_path)?;
+    let mut token_file = options.open(token_path)?;
     token_file.write_all(token.as_bytes())?;
 
     tracing::info!("Generated session token at {}", token_path.display());
 
     Ok(token)
+}
+
+pub fn generate_and_save_token() -> anyhow::Result<String> {
+    generate_and_save_token_to(&get_token_path())
 }
 
 #[cfg(test)]
@@ -56,10 +59,11 @@ mod tests {
 
     #[test]
     fn test_generate_and_save_token() {
-        let token = generate_and_save_token().unwrap();
+        let test_dir = std::env::temp_dir().join(format!("acpd-test-{}", std::process::id()));
+        let token_path = test_dir.join("token");
+        let token = generate_and_save_token_to(&token_path).unwrap();
         assert_eq!(token.len(), 32);
 
-        let token_path = get_token_path();
         assert!(token_path.exists());
 
         let read_back = fs::read_to_string(&token_path).unwrap();
@@ -72,5 +76,7 @@ mod tests {
             let mode = metadata.permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+
+        let _ = fs::remove_dir_all(test_dir);
     }
 }
