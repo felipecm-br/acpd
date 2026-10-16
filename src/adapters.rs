@@ -273,6 +273,36 @@ async fn unset_tmux_window_state(pane_id: &str) {
     }
 }
 
+async fn set_tmux_pane_state(pane_id: &str, raw: &str) {
+    let out = Command::new("tmux")
+        .args(["set-option", "-p", "-t", pane_id, "@ai_agent_state_raw", raw])
+        .output()
+        .await;
+    if let Ok(o) = out
+        && !o.status.success()
+    {
+        tracing::debug!(
+            "Tmux set_tmux_pane_state failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
+async fn unset_tmux_pane_state(pane_id: &str) {
+    let out = Command::new("tmux")
+        .args(["set-option", "-p", "-u", "-t", pane_id, "@ai_agent_state_raw"])
+        .output()
+        .await;
+    if let Ok(o) = out
+        && !o.status.success()
+    {
+        tracing::debug!(
+            "Tmux unset_tmux_pane_state failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+}
+
 #[allow(dead_code)]
 async fn set_tmux_option(pane_id: &str, option: &str, value: &str) {
     let out = Command::new("tmux")
@@ -325,8 +355,9 @@ async fn refresh_tmux_client() {
 
 pub struct TmuxAdapter {
     spinners: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
-    pending_idles: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     pane_states: Arc<Mutex<HashMap<String, AgentState>>>,
+    pane_windows: Arc<Mutex<HashMap<String, String>>>,
+    window_panes: Arc<Mutex<HashMap<String, HashMap<String, AgentState>>>>,
     spinner_frames: Vec<String>,
     spinner_interval: u64,
     theme: Option<ThemeConfig>,
@@ -340,25 +371,159 @@ impl TmuxAdapter {
         };
         Self {
             spinners: Arc::new(Mutex::new(HashMap::new())),
-            pending_idles: Arc::new(Mutex::new(HashMap::new())),
             pane_states: Arc::new(Mutex::new(HashMap::new())),
+            pane_windows: Arc::new(Mutex::new(HashMap::new())),
+            window_panes: Arc::new(Mutex::new(HashMap::new())),
             spinner_frames: frames,
             spinner_interval: interval,
             theme,
         }
     }
 
-    async fn stop_spinner(&self, pane_id: &str) {
+    async fn resolve_window_id(&self, pane_id: &str) -> String {
+        {
+            let pw = self.pane_windows.lock().await;
+            if let Some(w) = pw.get(pane_id) {
+                return w.clone();
+            }
+        }
+        let out = Command::new("tmux")
+            .args(["display-message", "-t", pane_id, "-p", "#{window_id}"])
+            .output()
+            .await;
+        let win = match out {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !s.is_empty() {
+                    s
+                } else {
+                    pane_id.to_string()
+                }
+            }
+            _ => pane_id.to_string(),
+        };
+        self.pane_windows
+            .lock()
+            .await
+            .insert(pane_id.to_string(), win.clone());
+        win
+    }
+
+    #[cfg(test)]
+    pub async fn set_pane_window_mapping(&self, pane_id: &str, window_id: &str) {
+        self.pane_windows
+            .lock()
+            .await
+            .insert(pane_id.to_string(), window_id.to_string());
+    }
+
+    #[cfg(test)]
+    pub async fn get_window_effective_state(&self, window_id: &str) -> Option<AgentState> {
+        let wp = self.window_panes.lock().await;
+        wp.get(window_id).and_then(|panes| {
+            panes
+                .values()
+                .filter(|s| **s != AgentState::Closed)
+                .max_by_key(|s| urgency_score(s))
+                .cloned()
+        })
+    }
+
+    async fn sync_window_state(&self, window_id: &str) {
+        let effective = {
+            let wp = self.window_panes.lock().await;
+            wp.get(window_id).and_then(|panes| {
+                panes
+                    .values()
+                    .filter(|s| **s != AgentState::Closed)
+                    .max_by_key(|s| urgency_score(s))
+                    .cloned()
+            })
+        };
+
+        match effective {
+            None => {
+                self.stop_spinner(window_id).await;
+                unset_tmux_window_state(window_id).await;
+                self.window_panes.lock().await.remove(window_id);
+            }
+            Some(AgentState::Working) => {
+                self.start_spinner(window_id.to_string()).await;
+            }
+            Some(state) => {
+                self.stop_spinner(window_id).await;
+                let default_theme = AgentStateTheme {
+                    icon: "?".to_string(),
+                    color: "white".to_string(),
+                };
+                let (icon, color, raw) = match state {
+                    AgentState::Idle => {
+                        let t = self
+                            .theme
+                            .as_ref()
+                            .and_then(|th| th.states.get("idle"))
+                            .unwrap_or(&default_theme);
+                        (t.icon.clone(), t.color.clone(), "idle")
+                    }
+                    AgentState::AwaitingInput => {
+                        let t = self
+                            .theme
+                            .as_ref()
+                            .and_then(|th| th.states.get("question"))
+                            .unwrap_or(&default_theme);
+                        (t.icon.clone(), t.color.clone(), "question")
+                    }
+                    AgentState::Permission => {
+                        let t = self
+                            .theme
+                            .as_ref()
+                            .and_then(|th| th.states.get("permission"))
+                            .unwrap_or(&default_theme);
+                        (t.icon.clone(), t.color.clone(), "permission")
+                    }
+                    AgentState::Stalled => {
+                        let t = self
+                            .theme
+                            .as_ref()
+                            .and_then(|th| th.states.get("stalled"))
+                            .cloned()
+                            .unwrap_or(AgentStateTheme {
+                                icon: "󱥁".to_string(),
+                                color: "#fab387".to_string(),
+                            });
+                        (t.icon, t.color, "stalled")
+                    }
+                    AgentState::Error => {
+                        let t = self
+                            .theme
+                            .as_ref()
+                            .and_then(|th| th.states.get("error"))
+                            .unwrap_or(&default_theme);
+                        (t.icon.clone(), t.color.clone(), "error")
+                    }
+                    _ => ("".to_string(), "".to_string(), ""),
+                };
+                set_tmux_window_state(window_id, &icon, raw, &color).await;
+            }
+        }
+    }
+
+    async fn stop_spinner(&self, target_id: &str) {
         let mut spinners = self.spinners.lock().await;
-        if let Some(task) = spinners.remove(pane_id) {
+        if let Some(task) = spinners.remove(target_id) {
             task.abort();
         }
     }
 
-    async fn start_spinner(&self, pane_id: String) {
-        self.stop_spinner(&pane_id).await;
+    async fn start_spinner(&self, target_id: String) {
+        {
+            let spinners = self.spinners.lock().await;
+            if spinners.contains_key(&target_id) {
+                return;
+            }
+        }
 
-        let pane_clone = pane_id.clone();
+        let target_clone = target_id.clone();
         let frames = self.spinner_frames.clone();
         let interval = self.spinner_interval;
         let (icon, color) = self
@@ -370,12 +535,12 @@ impl TmuxAdapter {
 
         let task = tokio::spawn(async move {
             if frames.is_empty() {
-                set_tmux_window_state(&pane_clone, &icon, "busy", &color).await;
+                set_tmux_window_state(&target_clone, &icon, "busy", &color).await;
                 return;
             }
 
             if frames.len() == 1 {
-                set_tmux_window_state(&pane_clone, &frames[0], "busy", &color).await;
+                set_tmux_window_state(&target_clone, &frames[0], "busy", &color).await;
                 return;
             }
 
@@ -384,14 +549,14 @@ impl TmuxAdapter {
             loop {
                 let frame = &frames[i % frames.len()];
 
-                set_tmux_window_state(&pane_clone, frame, "busy", &color).await;
+                set_tmux_window_state(&target_clone, frame, "busy", &color).await;
 
                 i += 1;
                 tokio::time::sleep(tokio::time::Duration::from_millis(interval)).await;
             }
         });
 
-        self.spinners.lock().await.insert(pane_id, task);
+        self.spinners.lock().await.insert(target_id, task);
     }
 
     async fn trigger_bell(&self, pane_id: &str, action: &str, force: bool) {
@@ -478,172 +643,93 @@ impl TmuxAdapter {
 #[async_trait]
 impl OutputAdapter for TmuxAdapter {
     async fn update(&self, update: &AgentUpdate) -> anyhow::Result<()> {
-        // Cancel any pending idle debounce task for this pane
-        {
-            let mut pending = self.pending_idles.lock().await;
-            if let Some(task) = pending.remove(&update.pane_id) {
-                task.abort();
-            }
-        }
+        let window_id = self.resolve_window_id(&update.pane_id).await;
 
-        // Debounce Idle state to prevent rapid flickering during tool call chains
-        if update.state == AgentState::Idle {
-            let pane_states = Arc::clone(&self.pane_states);
-            let spinners = Arc::clone(&self.spinners);
-            let theme = self.theme.clone();
-            let pane_id = update.pane_id.clone();
-
-            let task = tokio::spawn(async move {
-                // Check deduplication
-                {
-                    let mut states = pane_states.lock().await;
-                    if let Some(prev) = states.get(&pane_id)
-                        && prev == &AgentState::Idle
-                    {
-                        return;
-                    }
-                    states.insert(pane_id.clone(), AgentState::Idle);
-                }
-
-                // Stop any running spinner
-                {
-                    let mut sp = spinners.lock().await;
-                    if let Some(t) = sp.remove(&pane_id) {
-                        t.abort();
-                    }
-                }
-
-                let default_theme = AgentStateTheme {
-                    icon: "?".to_string(),
-                    color: "white".to_string(),
-                };
-                let t = theme
-                    .as_ref()
-                    .and_then(|th| th.states.get("idle"))
-                    .unwrap_or(&default_theme);
-
-                set_tmux_window_state(&pane_id, &t.icon, "idle", &t.color).await;
-
-                tracing::info!("TmuxAdapter: Debounced update pane {} to Idle", pane_id);
-            });
-
-            self.pending_idles
-                .lock()
-                .await
-                .insert(update.pane_id.clone(), task);
-            return Ok(());
-        }
-
-        // State deduplication: ignore redundant updates for the same state on the same pane
-        {
+        // State deduplication per pane: ignore redundant updates for the same state on the same pane
+        let is_redundant = {
             let mut states = self.pane_states.lock().await;
             if let Some(prev) = states.get(&update.pane_id)
                 && prev == &update.state
             {
-                return Ok(());
-            }
-            if update.state == AgentState::Closed {
-                states.remove(&update.pane_id);
+                true
             } else {
-                states.insert(update.pane_id.clone(), update.state.clone());
+                if update.state == AgentState::Closed {
+                    states.remove(&update.pane_id);
+                } else {
+                    states.insert(update.pane_id.clone(), update.state.clone());
+                }
+                false
+            }
+        };
+
+        if is_redundant {
+            return Ok(());
+        }
+
+        // Set or clear pane-specific state option in tmux (@ai_agent_state_raw)
+        if update.state == AgentState::Closed {
+            unset_tmux_pane_state(&update.pane_id).await;
+            self.pane_windows.lock().await.remove(&update.pane_id);
+        } else {
+            let pane_raw = match &update.state {
+                AgentState::Working => "busy",
+                AgentState::Idle => "idle",
+                AgentState::AwaitingInput => "question",
+                AgentState::Permission => "permission",
+                AgentState::Stalled => "stalled",
+                AgentState::Error => "error",
+                AgentState::Closed => "",
+            };
+            set_tmux_pane_state(&update.pane_id, pane_raw).await;
+        }
+
+        // Update window-panes mapping
+        {
+            let mut wp = self.window_panes.lock().await;
+            let panes = wp.entry(window_id.clone()).or_default();
+            if update.state == AgentState::Closed {
+                panes.remove(&update.pane_id);
+            } else {
+                panes.insert(update.pane_id.clone(), update.state.clone());
             }
         }
 
-        match &update.state {
-            AgentState::Working => {
-                self.start_spinner(update.pane_id.clone()).await;
-            }
-            state => {
-                self.stop_spinner(&update.pane_id).await;
+        // Recalculate and sync aggregated window state
+        self.sync_window_state(&window_id).await;
 
-                // Dynamic colors from theme
-                let default_theme = AgentStateTheme {
-                    icon: "?".to_string(),
-                    color: "white".to_string(),
-                };
+        // Trigger bell if this specific pane requested attention
+        let (action_msg, force_bell) = match update.state {
+            AgentState::AwaitingInput => (Some("󱜻 question"), true),
+            AgentState::Permission => (Some("󱅭 permission"), true),
+            AgentState::Stalled => (Some("󱥁 stalled"), true),
+            _ => (None, false),
+        };
 
-                let (icon, color, raw) = match state {
-                    AgentState::Closed => {
-                        // Clear the variables instead of setting them
-                        unset_tmux_window_state(&update.pane_id).await;
-                        tracing::info!("TmuxAdapter: Cleared variables for Closed state");
-                        return Ok(());
-                    }
-                    AgentState::Idle => unreachable!(),
-                    AgentState::AwaitingInput => {
-                        let t = self
-                            .theme
-                            .as_ref()
-                            .and_then(|th| th.states.get("question"))
-                            .unwrap_or(&default_theme);
-                        (t.icon.clone(), t.color.clone(), "question")
-                    }
-                    AgentState::Permission => {
-                        let t = self
-                            .theme
-                            .as_ref()
-                            .and_then(|th| th.states.get("permission"))
-                            .unwrap_or(&default_theme);
-                        (t.icon.clone(), t.color.clone(), "permission")
-                    }
-                    AgentState::Stalled => {
-                        let t = self
-                            .theme
-                            .as_ref()
-                            .and_then(|th| th.states.get("stalled"))
-                            .cloned()
-                            .unwrap_or(AgentStateTheme {
-                                icon: "󱥁".to_string(),
-                                color: "#fab387".to_string(),
-                            });
-                        (t.icon, t.color, "stalled")
-                    }
-                    AgentState::Error => {
-                        let t = self
-                            .theme
-                            .as_ref()
-                            .and_then(|th| th.states.get("error"))
-                            .unwrap_or(&default_theme);
-                        (t.icon.clone(), t.color.clone(), "error")
-                    }
-                    _ => unreachable!(),
-                };
-
-                set_tmux_window_state(&update.pane_id, &icon, raw, &color).await;
-
-                // Trigger a bell based on state
-                let (action_msg, force_bell) = match state {
-                    AgentState::AwaitingInput => (Some("󱜻 question"), true),
-                    AgentState::Permission => (Some("󱅭 permission"), true),
-                    AgentState::Stalled => (Some("󱥁 stalled"), true),
-                    _ => (None, false),
-                };
-
-                if let Some(msg) = action_msg {
-                    self.trigger_bell(&update.pane_id, msg, force_bell).await;
-                }
-            }
+        if let Some(msg) = action_msg {
+            self.trigger_bell(&update.pane_id, msg, force_bell).await;
         }
 
         tracing::info!(
-            "TmuxAdapter: Updated pane {} to {:?}",
+            "TmuxAdapter: Updated pane {} (win {}) to {:?}",
             update.pane_id,
+            window_id,
             update.state
         );
         Ok(())
     }
 
     async fn rehydrate(&self, update: &AgentUpdate) -> anyhow::Result<()> {
-        // Record pane state in internal cache to prevent redundant updates
+        let window_id = self.resolve_window_id(&update.pane_id).await;
         {
             let mut states = self.pane_states.lock().await;
             states.insert(update.pane_id.clone(), update.state.clone());
         }
-
-        // If the agent was working, resume spinner animation without bells
-        if update.state == AgentState::Working {
-            self.start_spinner(update.pane_id.clone()).await;
+        {
+            let mut wp = self.window_panes.lock().await;
+            let panes = wp.entry(window_id.clone()).or_default();
+            panes.insert(update.pane_id.clone(), update.state.clone());
         }
+        self.sync_window_state(&window_id).await;
         Ok(())
     }
 }
@@ -923,6 +1009,129 @@ mod tests {
         };
         assert!(adapter.update(&update_working).await.is_ok());
         adapter.stop_spinner("%1").await;
+    }
+
+    #[tokio::test]
+    async fn test_tmux_adapter_multi_pane_urgency_aggregation() {
+        let adapter = TmuxAdapter::new(None, None);
+
+        // Manually bind %1 and %2 to the same window @10
+        adapter.set_pane_window_mapping("%1", "@10").await;
+        adapter.set_pane_window_mapping("%2", "@10").await;
+
+        // 1. Pane 1 asks permission (urgency = 6)
+        adapter
+            .update(&AgentUpdate {
+                pane_id: "%1".to_string(),
+                state: AgentState::Permission,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adapter.get_window_effective_state("@10").await,
+            Some(AgentState::Permission),
+            "Window @10 must have state Permission"
+        );
+
+        // 2. Pane 2 finishes background task and enters Idle (urgency = 1)
+        adapter
+            .update(&AgentUpdate {
+                pane_id: "%2".to_string(),
+                state: AgentState::Idle,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        // Pane 2 entering Idle must NOT downgrade window @10 from Permission to Idle!
+        assert_eq!(
+            adapter.get_window_effective_state("@10").await,
+            Some(AgentState::Permission),
+            "Window @10 must maintain Permission even when Pane 2 goes Idle"
+        );
+
+        // 3. Pane 2 starts working (urgency = 2)
+        adapter
+            .update(&AgentUpdate {
+                pane_id: "%2".to_string(),
+                state: AgentState::Working,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adapter.get_window_effective_state("@10").await,
+            Some(AgentState::Permission),
+            "Window @10 must still prioritize Permission over Working"
+        );
+
+        // 4. User replies to Pane 1, resolving Permission -> Idle
+        adapter
+            .update(&AgentUpdate {
+                pane_id: "%1".to_string(),
+                state: AgentState::Idle,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        // Now Pane 2 is Working and Pane 1 is Idle. Max urgency is Working!
+        assert_eq!(
+            adapter.get_window_effective_state("@10").await,
+            Some(AgentState::Working),
+            "Window @10 must switch to Working since Pane 2 is still working"
+        );
+
+        // 5. Pane 2 also becomes Idle
+        adapter
+            .update(&AgentUpdate {
+                pane_id: "%2".to_string(),
+                state: AgentState::Idle,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adapter.get_window_effective_state("@10").await,
+            Some(AgentState::Idle),
+            "Window @10 must become Idle when all panes are Idle"
+        );
+
+        // 6. Pane 1 closes
+        adapter
+            .update(&AgentUpdate {
+                pane_id: "%1".to_string(),
+                state: AgentState::Closed,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adapter.get_window_effective_state("@10").await,
+            Some(AgentState::Idle),
+            "Window @10 must remain Idle because Pane 2 is still open"
+        );
+
+        // 7. Pane 2 closes
+        adapter
+            .update(&AgentUpdate {
+                pane_id: "%2".to_string(),
+                state: AgentState::Closed,
+                message: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            adapter.get_window_effective_state("@10").await,
+            None,
+            "Window @10 should have no effective state when all panes close"
+        );
     }
 
     #[tokio::test]
