@@ -559,6 +559,29 @@ impl TmuxAdapter {
         self.spinners.lock().await.insert(target_id, task);
     }
 
+    pub fn should_notify_clients(clients_output: &str, session: &str, window_id: &str) -> bool {
+        let non_empty_lines: Vec<_> = clients_output
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+
+        if non_empty_lines.is_empty() {
+            // Detached: no clients attached to tmux server -> notify
+            return true;
+        }
+
+        let active_on_this_window = non_empty_lines.iter().any(|line| {
+            let mut iter = line.split_whitespace();
+            if let (Some(c_sess), Some(c_wid)) = (iter.next(), iter.next()) {
+                c_sess == session && c_wid == window_id
+            } else {
+                false
+            }
+        });
+
+        !active_on_this_window
+    }
+
     async fn trigger_bell(&self, pane_id: &str, action: &str, force: bool) {
         // Fetch session and window properties for the pane
         let output = Command::new("tmux")
@@ -581,28 +604,21 @@ impl TmuxAdapter {
                 let window_idx = parts[2];
                 let window_name = parts[3];
 
-                // Check if any other client is looking elsewhere
+                // Check attached clients: if user is actively focused on this window in the session, suppress bell.
+                // If the session/window is detached (no clients attached or looking elsewhere), notify must remain true!
                 let clients_out = Command::new("tmux")
                     .args(["list-clients", "-F", "#{client_session} #{window_id}"])
                     .output()
                     .await;
 
-                let mut notify = true;
-                if !force && let Ok(cout) = clients_out {
+                let notify = if force {
+                    true
+                } else if let Ok(cout) = clients_out {
                     let clients_str = String::from_utf8_lossy(&cout.stdout);
-                    let any_other_client = clients_str.lines().any(|line| {
-                        let mut iter = line.split_whitespace();
-                        if let (Some(c_sess), Some(c_wid)) = (iter.next(), iter.next()) {
-                            !(c_sess == session && c_wid == window_id)
-                        } else {
-                            false
-                        }
-                    });
-
-                    if !any_other_client {
-                        notify = false;
-                    }
-                }
+                    Self::should_notify_clients(&clients_str, session, window_id)
+                } else {
+                    true
+                };
 
                 if notify {
                     let _ = Command::new("tmux")
@@ -1234,5 +1250,39 @@ mod tests {
         assert_eq!(resolved_resp, Some(resp_file.to_string_lossy().to_string()));
 
         let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn test_should_notify_clients_detached_and_attached() {
+        // 1. Completely detached (empty clients list) -> must notify
+        assert!(
+            TmuxAdapter::should_notify_clients("", "work", "@1"),
+            "Empty clients output (detached) must notify"
+        );
+        assert!(
+            TmuxAdapter::should_notify_clients("   \n\n  ", "work", "@1"),
+            "Whitespace clients output (detached) must notify"
+        );
+
+        // 2. Active client is focused on the exact same session and window -> suppress bell (false)
+        let attached_same_window = "work @1\n";
+        assert!(
+            !TmuxAdapter::should_notify_clients(attached_same_window, "work", "@1"),
+            "Client focused on same window must suppress notification"
+        );
+
+        // 3. Active client is focused on a different window in the same session -> must notify
+        let attached_other_window = "work @2\n";
+        assert!(
+            TmuxAdapter::should_notify_clients(attached_other_window, "work", "@1"),
+            "Client focused on different window must notify"
+        );
+
+        // 4. Active client is focused on another session -> must notify
+        let attached_other_session = "personal @1\n";
+        assert!(
+            TmuxAdapter::should_notify_clients(attached_other_session, "work", "@1"),
+            "Client focused on different session must notify"
+        );
     }
 }

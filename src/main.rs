@@ -34,8 +34,9 @@ health                 Check health status of running daemon",
     }
 
     if args.get(1).map(|s| s.as_str()) == Some("health") {
-        match tokio::net::TcpStream::connect("127.0.0.1:4040").await {
-            Ok(mut stream) => {
+        let connect_timeout = std::time::Duration::from_millis(1500);
+        match tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect("127.0.0.1:4040")).await {
+            Ok(Ok(mut stream)) => {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 let req =
                     b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:4040\r\nConnection: close\r\n\r\n";
@@ -55,8 +56,12 @@ health                 Check health status of running daemon",
                 eprintln!("unhealthy: unexpected response from acpd");
                 std::process::exit(1);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("acpd is not running or unreachable on port 4040: {}", e);
+                std::process::exit(1);
+            }
+            Err(_) => {
+                eprintln!("acpd connection timed out after 1.5s connecting to 127.0.0.1:4040");
                 std::process::exit(1);
             }
         }

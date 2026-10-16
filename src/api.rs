@@ -947,6 +947,11 @@ async fn handle_rpc(
                             id: payload.id,
                         }),
                         Err(_) => {
+                            tracing::debug!(
+                                "RPC agentState/wait connection timed out after {}s for pane {}",
+                                timeout_secs,
+                                pane_id
+                            );
                             let current_state = {
                                 let states = adapters.pane_states.lock().await;
                                 states
