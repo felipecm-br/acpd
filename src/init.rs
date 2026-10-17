@@ -16,12 +16,16 @@ bind-key -n C-S-g run-shell -b \"waymux wt popup\""
         "--systemd" | "systemd" => {
             println!(
                 "[Unit]\n\
-Description=Waymux / ACPD Autonomous Cockpit Protocol Daemon\n\
-After=network.target\n\n\
+Description=Waymux: Terminal AI Cockpit & Agent Control Plane Daemon\n\
+After=network-online.target\n\
+Wants=network-online.target\n\n\
 [Service]\n\
-ExecStart=%h/.local/bin/acpd\n\
-Restart=always\n\
-RestartSec=2\n\n\
+Type=notify\n\
+ExecStart=%h/.local/bin/waymux daemon\n\
+ExecReload=/bin/kill -HUP $MAINPID\n\
+Restart=on-failure\n\
+RestartSec=5s\n\
+RuntimeDirectory=waymux acpd\n\n\
 [Install]\n\
 WantedBy=default.target"
             );

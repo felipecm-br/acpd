@@ -29,8 +29,11 @@ OPTIONS:\n    \
 -h, --help             Print help information\n    \
 -V, --version          Print version information\n\n\
 COMMANDS:\n    \
-daemon                 Start the async JSON-RPC & HTTP state daemon (default for acpd)\n    \
+daemon                 Start the async JSON-RPC & HTTP state daemon (default)\n    \
 health                 Check health status of running daemon\n    \
+status                 Print daemon health and active AI agent states\n    \
+list                   List active AI agent pane states (TSV)\n    \
+dismiss                Dismiss attention/question/permission badge for a pane\n    \
 cockpit                Launch the interactive Fleet & Agent Cockpit HUD popup\n    \
 cockpit-items          Emit prioritized 12-column TSV rows for Cockpit HUD\n    \
 cockpit-preview        Render contextual agent card and terminal snapshot\n    \
@@ -80,6 +83,9 @@ pub fn entry() -> anyhow::Result<()> {
             return Ok(());
         }
         "health" => Some(rpc_client::check_health_cli()),
+        "status" => Some(rpc_client::status_cli()),
+        "list" => Some(rpc_client::list_agents_cli()),
+        "dismiss" => Some(rpc_client::dismiss_pane_cli(&args[2..])),
         "cockpit" => Some(cockpit::run_cockpit(&args[2..])),
         "cockpit-items" => Some(cockpit::items::run_cli(&args[2..])),
         "cockpit-preview" => Some(cockpit::preview::run_cli(&args[2..])),
@@ -118,7 +124,7 @@ pub fn entry() -> anyhow::Result<()> {
             .with(tracing_subscriber::fmt::layer())
             .init();
 
-        tracing::info!("Starting Waymux / ACP Daemon (acpd)...");
+        tracing::info!("Starting Waymux Daemon...");
 
         let mut config_path = None;
         let mut iter = args.iter().skip(1);
@@ -132,35 +138,33 @@ pub fn entry() -> anyhow::Result<()> {
             }
         }
 
-        let config_path = match config_path {
-            Some(path) => path,
+        let config = match config_path {
+            Some(path) => {
+                tracing::info!("Loading config from {}", path);
+                crate::config::Config::load(&path)?
+            }
             None => {
                 let xdg_config = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
                     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
                     format!("{}/.config", home)
                 });
-                let user_path = format!("{}/acpd/config.toml", xdg_config);
-                let system_path = "/etc/acpd/config.toml";
-                let dev_path = "config/default.toml";
+                let candidates = [
+                    format!("{}/waymux/config.toml", xdg_config),
+                    format!("{}/acpd/config.toml", xdg_config),
+                    "/etc/waymux/config.toml".to_string(),
+                    "/etc/acpd/config.toml".to_string(),
+                    "config/default.toml".to_string(),
+                ];
 
-                if Path::new(&user_path).is_file() {
-                    user_path
-                } else if Path::new(system_path).is_file() {
-                    system_path.to_string()
-                } else if Path::new(dev_path).is_file() {
-                    tracing::info!("System/User config not found, falling back to {}", dev_path);
-                    dev_path.to_string()
+                if let Some(found) = candidates.iter().find(|p| Path::new(p).is_file()) {
+                    tracing::info!("Loading config from {}", found);
+                    crate::config::Config::load(found)?
                 } else {
-                    anyhow::bail!(
-                        "No config file found. Provide one with --config <path>, or create {}",
-                        user_path
-                    );
+                    tracing::info!("No external config file found, using built-in defaults");
+                    crate::config::Config::default()
                 }
             }
         };
-
-        tracing::info!("Loading config from {}", config_path);
-        let config = crate::config::Config::load(&config_path)?;
 
         let _pid_file = if let Some(ref path) = config.pid_file {
             tracing::info!("Creating PID file at {}", path);

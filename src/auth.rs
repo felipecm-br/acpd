@@ -5,6 +5,20 @@ use std::path::PathBuf;
 
 pub fn get_token_path() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(xdg).join("waymux").join("token")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home)
+            .join(".cache")
+            .join("waymux")
+            .join("token")
+    } else {
+        let uid = nix::unistd::getuid();
+        PathBuf::from(format!("/tmp/waymux-{}", uid)).join("token")
+    }
+}
+
+pub fn get_legacy_token_path() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(xdg).join("acpd").join("token")
     } else if let Ok(home) = std::env::var("HOME") {
         PathBuf::from(home)
@@ -17,7 +31,7 @@ pub fn get_token_path() -> PathBuf {
     }
 }
 
-pub fn generate_and_save_token_to(token_path: &std::path::Path) -> anyhow::Result<String> {
+fn write_token_file(token_path: &std::path::Path, token: &str) -> anyhow::Result<()> {
     if let Some(parent) = token_path.parent() {
         fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -27,6 +41,17 @@ pub fn generate_and_save_token_to(token_path: &std::path::Path) -> anyhow::Resul
         }
     }
 
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut token_file = options.open(token_path)?;
+    token_file.write_all(token.as_bytes())?;
+    Ok(())
+}
+
+pub fn generate_and_save_token_to(token_path: &std::path::Path) -> anyhow::Result<String> {
     let mut bytes = [0u8; 16];
     let mut file = fs::File::open("/dev/urandom")?;
     file.read_exact(&mut bytes)?;
@@ -36,21 +61,18 @@ pub fn generate_and_save_token_to(token_path: &std::path::Path) -> anyhow::Resul
         .map(|b| format!("{:02x}", b))
         .collect::<String>();
 
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-
-    let mut token_file = options.open(token_path)?;
-    token_file.write_all(token.as_bytes())?;
-
+    write_token_file(token_path, &token)?;
     tracing::info!("Generated session token at {}", token_path.display());
 
     Ok(token)
 }
 
 pub fn generate_and_save_token() -> anyhow::Result<String> {
-    generate_and_save_token_to(&get_token_path())
+    let primary = get_token_path();
+    let token = generate_and_save_token_to(&primary)?;
+    let legacy = get_legacy_token_path();
+    let _ = write_token_file(&legacy, &token);
+    Ok(token)
 }
 
 #[cfg(test)]

@@ -9,11 +9,20 @@ pub fn read_token() -> Option<String> {
     let uid = nix::unistd::getuid();
     let mut candidates = Vec::new();
     if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
+        candidates.push(PathBuf::from(&xdg).join("waymux").join("token"));
         candidates.push(PathBuf::from(xdg).join("acpd").join("token"));
     }
+    candidates.push(PathBuf::from(format!("/run/user/{}/waymux/token", uid)));
     candidates.push(PathBuf::from(format!("/run/user/{}/acpd/token", uid)));
+    candidates.push(PathBuf::from(format!("/tmp/waymux-{}/token", uid)));
     candidates.push(PathBuf::from(format!("/tmp/acpd-{}/token", uid)));
     if let Ok(home) = std::env::var("HOME") {
+        candidates.push(
+            PathBuf::from(&home)
+                .join(".cache")
+                .join("waymux")
+                .join("token"),
+        );
         candidates.push(
             PathBuf::from(home)
                 .join(".cache")
@@ -21,6 +30,7 @@ pub fn read_token() -> Option<String> {
                 .join("token"),
         );
     }
+    candidates.push(PathBuf::from("/run/user/1001/waymux/token"));
     candidates.push(PathBuf::from("/run/user/1001/acpd/token"));
 
     for path in candidates {
@@ -179,12 +189,73 @@ pub fn check_health_cli() -> i32 {
             0
         }
         Some((code, _)) => {
-            eprintln!("unhealthy: unexpected HTTP {} from acpd", code);
+            eprintln!("unhealthy: unexpected HTTP {} from waymux daemon", code);
             1
         }
         None => {
-            eprintln!("acpd is not running or unreachable on port 4040");
+            eprintln!("waymux daemon is not running or unreachable on port 4040");
             1
         }
     }
+}
+
+pub fn dismiss_pane_cli(args: &[String]) -> i32 {
+    let pane = args
+        .first()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| crate::tmux_cmd::tmux_out(&["display-message", "-p", "#{pane_id}"]))
+        .unwrap_or_default();
+
+    if pane.is_empty() {
+        return 0;
+    }
+
+    let token = match read_token() {
+        Some(t) => t,
+        None => return 0,
+    };
+
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "agentState/dismiss",
+        "params": { "pane_id": pane },
+        "id": 1
+    });
+
+    let _ = http_post_json(4040, "/rpc", Some(&token), &payload, 200);
+    0
+}
+
+pub fn list_agents_cli() -> i32 {
+    let states = fetch_agent_states();
+    let mut entries: Vec<_> = states.into_iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (pane_id, entry) in entries {
+        println!("{}\t{}\t{}", pane_id, entry.state, entry.last_timestamp);
+    }
+    0
+}
+
+pub fn status_cli() -> i32 {
+    println!("━━━ ⚙️  Waymux Control Plane Status ━━━");
+    if check_health_cli() != 0 {
+        return 1;
+    }
+    println!();
+    println!("── Active Agent States ──");
+    let states = fetch_agent_states();
+    if states.is_empty() {
+        println!("  (No active agents reporting state)");
+    } else {
+        let mut entries: Vec<_> = states.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (pane_id, entry) in entries {
+            println!(
+                "  󰑮 Pane: {} | State: {} | Last: {}",
+                pane_id, entry.state, entry.last_timestamp
+            );
+        }
+    }
+    0
 }

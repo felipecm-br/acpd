@@ -58,6 +58,29 @@ fn default_port() -> u16 {
     4040
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            listen_addr: default_listen_addr(),
+            port: default_port(),
+            pid_file: None,
+            shutdown_timeout_secs: Some(5),
+            log_level: Some("info".to_string()),
+            idle_debounce_ms: Some(300),
+            theme: None,
+            spinners: None,
+            sound: Some(SoundConfig {
+                enabled: true,
+                player: None,
+                response: None,
+                question: None,
+                permission: None,
+                error: None,
+            }),
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
