@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-# Este script automatiza o rebuild e o recarregamento do daemon durante o desenvolvimento
+# Rebuild the release binary, install atomically to ~/.local/bin, and restart the user systemd daemon.
 
-echo "🚀 Compilando o ACPD em modo Release..."
-~/.cargo/bin/cargo build --release
+echo "Building waymux in release mode..."
+cargo build --release
 
-echo "🔄 Reiniciando o serviço no Systemd..."
+mkdir -p "$HOME/.local/bin"
+install -m 755 target/release/waymux "$HOME/.local/bin/waymux"
+ln -sf "$HOME/.local/bin/waymux" "$HOME/.local/bin/acpd"
+
+echo "Reloading and restarting waymux.service..."
 systemctl --user daemon-reload
-systemctl --user restart acpd
+systemctl --user restart waymux.service
 
-echo "✅ Pronto! O ACPD está rodando com o seu código mais recente."
-systemctl --user status acpd --no-pager
+echo "Done! waymux.service is running the latest build:"
+systemctl --user status waymux.service --no-pager | head -n 14

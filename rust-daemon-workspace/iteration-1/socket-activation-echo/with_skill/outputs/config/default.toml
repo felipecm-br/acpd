@@ -1,6 +1,0 @@
-# default.toml — reference configuration for echo-daemon
-listen_addr = "0.0.0.0"
-port = 9090
-# pid_file = "/run/echo-daemon/echo-daemon.pid"
-shutdown_timeout_secs = 30
-log_level = "info"

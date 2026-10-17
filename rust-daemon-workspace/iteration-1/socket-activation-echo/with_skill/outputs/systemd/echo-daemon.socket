@@ -1,9 +1,0 @@
-[Unit]
-Description=Echo Daemon Socket
-
-[Socket]
-ListenStream=0.0.0.0:9090
-NoDelay=true
-
-[Install]
-WantedBy=sockets.target

@@ -1,0 +1,23 @@
+name: CI Suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check Formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy Lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run Unit Test Suite
+        run: cargo test --all-targets

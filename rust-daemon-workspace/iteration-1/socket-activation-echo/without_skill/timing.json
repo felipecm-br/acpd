@@ -1,6 +1,0 @@
-{
-  "total_tokens": null,
-  "duration_ms": null,
-  "total_duration_seconds": null,
-  "notes": "No timing data available from notification — subagent completed but did not report token/duration metrics."
-}

@@ -1,94 +1,43 @@
-# Contributing to acpd
+# Contributing to Waymux (`waymux` / `acpd`)
 
-Thank you for considering a contribution to `acpd`! This guide covers how to get started and what we expect from pull requests.
+Thank you for contributing to **Waymux**! This guide covers development setup, quality gates, and pull request conventions.
 
-## Development setup
+## Development Setup
 
-You need Rust 1.95 or later.
+Requires Rust 1.85+ (edition 2024) and Tmux 3.2+.
 
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/felipecm-br/acpd.git
 cd acpd
 
-# Build the project
+# Build both waymux and acpd binaries
 cargo build
 
-# Run the daemon locally
-cargo run -- --config config/default.toml
+# Run the test suite (30+ unit tests)
+cargo test
 ```
 
-See `AGENTS.md` for detailed agent-focused instructions and `README.md` for a quick-start overview.
+See [AGENTS.md](AGENTS.md) for the complete module map and architectural invariants, and [README.md](README.md) for CLI and RPC usage.
 
-## Commit best practices
+## Quality Gates Before Submitting a Pull Request
 
-> **Always prefer small, focused commits.** Each commit should represent a single logical change — one feature, one fix, one refactor, or one documentation update. Avoid bundling unrelated changes into a single commit.
->
-> Why: small commits make reviews faster, history easier to bisect, rollbacks safer, and blame more useful.
-
-Guidelines for every commit:
-
-- **Atomic commits:** a commit should be complete and self-contained. Tests and formatting for that change should pass after the commit.
-- **Clear, imperative messages:** write `Add health endpoint`, not `Added health endpoint` or `Adding health endpoint`.
-- **Subject line under 72 characters** when possible.
-- **Body when helpful:** explain *why* the change was made if the reason is not obvious from the diff.
-- **No unrelated changes:** do not mix formatting fixes, refactors, and feature work in the same commit.
-
-Example good commits:
-
-```text
-Add JSON-RPC agentState/update handler
-
-Implements the ACP standard method so Claude Code and Goose
-can update pane state directly.
-```
-
-```text
-Fix PID file cleanup on stale process detection
-```
-
-## Before submitting a pull request
-
-Run these checks locally:
+Every commit and pull request must pass our automated CI suite with **zero warnings**:
 
 ```bash
-cargo build
-cargo test
-cargo fmt
-cargo clippy -- -D warnings
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
 ```
 
-> Note: the current codebase has pre-existing `cargo fmt` and `cargo clippy` warnings. Do not introduce new warnings, and fix existing ones when you touch related files.
+## Commit Best Practices
 
-## Pull request process
+- **Atomic commits:** Each commit should represent a single logical change (one feature, fix, refactor, or documentation update).
+- **Conventional commit messages:** Use clear prefixes (`feat(cockpit): ...`, `fix(hook): ...`, `docs: ...`) with a subject line under 72 characters.
+- **Test coverage:** New logic—especially state transitions, `/proc` parsing, hook classification, and worktree operations—must include unit tests.
 
-1. **Small commits required:** every PR must consist of small, focused commits. See the [Commit best practices](#commit-best-practices) section above.
-2. **One logical change per PR:** avoid combining unrelated features, refactors, and formatting fixes.
-3. **All checks must pass:** `cargo build`, `cargo test`, `cargo fmt`, and `cargo clippy -- -D warnings`.
-4. **At least one review approval** is expected before merging.
-5. Keep the PR description concise and reference related issues when applicable.
+## Code Style & Performance Rules
 
-## Code style
-
-- Use `anyhow::Result` for fallible operations.
-- Keep modules focused: `api.rs` for HTTP/RPC routes & debouncing, `daemon.rs` for lifecycle & background tasks, `adapters.rs` for output sinks (tmux border/color styling & waybar), `auth.rs` for token authentication, `signals.rs` for signal handling, `state.rs` for agent state definitions, `pid.rs` for PID file management, and `health.rs` for probes.
-- Prefer structured logging via `tracing` over `println!`.
-- Deserialize config with `serde` + `toml`.
-
-## Adding tests
-
-The project currently has no unit tests. New logic — especially state parsing, config loading, and adapter behavior — should include tests.
-
-```bash
-# Run the test suite
-cargo test
-
-# Run a specific test
-cargo test <test_name>
-```
-
-## Getting help
-
-- Open an issue for bugs or feature requests.
-- See `AGENTS.md` for agent-focused project details.
-- See `ARCHITECTURE.md` for the original design and migration plan.
+- **Keep CLI subcommands synchronous:** Do not require the Tokio runtime for CLI commands routed in `src/lib.rs`.
+- **No hardcoded user paths:** Always resolve runtime and config paths via `$XDG_RUNTIME_DIR`, `$XDG_CONFIG_HOME`, and `$HOME`.
+- **English-only documentation:** All code comments, commit messages, scripts, and markdown files must be written in English.
