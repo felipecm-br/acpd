@@ -161,7 +161,12 @@ pub fn run_cockpit(args: &[String]) -> i32 {
         let orig_sess = tmux_out(&["display-message", "-p", "#{session_name}"]).unwrap_or_default();
         let orig_win = tmux_out(&["display-message", "-p", "#{window_index}"]).unwrap_or_default();
         let theme = ThemePalette::load();
-        let text_col = std::env::var("TMUX_POPUP_TEXT_COLOR").unwrap_or_else(|_| "default".into());
+        let popup_text_opt = tmux_get_global_opt("@POPUP_TEXT_COLOR");
+        let text_col = std::env::var("TMUX_POPUP_TEXT_COLOR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| (!popup_text_opt.is_empty()).then_some(popup_text_opt))
+            .unwrap_or_else(|| "default".into());
         let popup_cmd = format!(
             "TMUX_POPUP=1 TMUX_ORIGIN_SESSION='{}' TMUX_ORIGIN_WINDOW='{}' '{}' cockpit",
             orig_sess, orig_win, exe_str
@@ -186,7 +191,6 @@ pub fn run_cockpit(args: &[String]) -> i32 {
         return 0;
     }
 
-    let theme = ThemePalette::load();
     let spinner_opt = tmux_get_global_opt("@ai_agent_spinner");
     let spinner_name = if spinner_opt.is_empty() {
         "minidot"
@@ -210,21 +214,28 @@ pub fn run_cockpit(args: &[String]) -> i32 {
     let toml_path = materialize_cockpit_toml();
     let wm_bin = find_wm_bin();
 
-    let color_spec = std::env::var("TMUX_COLOR_SPEC").unwrap_or_else(|_| {
-        format!(
-            "bg:-1,fg:{},hl:{},hl+:{},fg+:{},pointer:{},marker:{},prompt:{},header:{}",
-            theme.fg,
-            theme.cyan,
-            theme.cyan,
-            theme.fg,
-            theme.cyan,
-            theme.yellow,
-            theme.cyan,
-            theme.blue
-        )
-    });
-    let spinner_color =
-        std::env::var("TMUX_SPINNER_COLOR").unwrap_or_else(|_| theme.yellow.clone());
+    let seg_bg = tmux_get_global_opt("@SEGMENT_BG");
+    let fg_opt = tmux_get_global_opt("@FG");
+    let accent_opt = tmux_get_global_opt("@ACCENT_COLOR");
+
+    let color_spec = std::env::var("TMUX_COLOR_SPEC")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if !seg_bg.is_empty() && !fg_opt.is_empty() && !accent_opt.is_empty() {
+                format!(
+                    "list-border:{},group-header:{},selected-prefix:{},selected-fg:{}",
+                    seg_bg, fg_opt, accent_opt, fg_opt
+                )
+            } else {
+                "list-border:239,group-header:245,selected-prefix:214,selected-fg:223".to_string()
+            }
+        });
+    let spinner_color = std::env::var("TMUX_SPINNER_COLOR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| (!accent_opt.is_empty()).then_some(accent_opt))
+        .unwrap_or_else(|| "214".to_string());
 
     loop {
         let items_str = items::generate_items(false, &orig_sess, &orig_win);
