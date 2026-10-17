@@ -4,7 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.1.1] - 2026-10-08
+## [0.1.2] - 2026-10-17
+
+### 🚀 Features
+
+- Implement proactive supervision with stall detection, auto-dismiss, and wait RPC
+- Allow `question` and `busy` aliases in agent state parsing
+- Instrument agent question and human reply latency tracking for evidence-based telemetry
+
+### 🐛 Bug Fixes & Improvements
+
+- Preserve bell notifications when window is detached and add connection timeout logging
+- Aggregate multi-pane urgency states per window in `TmuxAdapter`
+- Batch Tmux option updates and aggregate highest urgency for Waybar
+- Isolate event sound resolution and protect auth tokens in test suites
 
 ### 🚀 Features
 
