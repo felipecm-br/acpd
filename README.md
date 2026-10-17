@@ -22,6 +22,7 @@ AI agent  ──HTTP──▶  acpd  ──▶  Tmux / Waybar / Notifications
 - **Health and readiness probes** at `GET /health` and `GET /ready`
 - **systemd-notify integration** for `Type=notify` services
 - **Graceful shutdown** on `SIGTERM`/`SIGINT`, config reload hook on `SIGHUP`
+- **Unified `waymux` Orchestrator CLI (`v0.2.0+`)**: Built alongside `acpd` from the same crate, providing sub-2ms synchronous CLI commands for the Cockpit HUD (`waymux cockpit`), 12-column TSV item generation (`cockpit-items`), live previews (`cockpit-preview`, `cockpit-diff`, `cockpit-help`), review note dispatch (`review-notes`), alert triage (`triage --popup|--jump`), zero-Node agent hooks (`hook tmux|lazygit`), bracketed-paste injection (`inject`), Git worktree orchestration (`wt`), and portable setup (`init`).
 
 ## Quick start
 

@@ -1,0 +1,209 @@
+[start]
+sort = false
+ansi = true
+
+[matcher.sort]
+threshold = false
+
+[start.command]
+command = "__WAYMUX_BIN__ cockpit-items"
+additional = [
+    "__WAYMUX_BIN__ cockpit-items",
+    "__WAYMUX_BIN__ cockpit-items --agents",
+]
+
+[columns]
+split = '\t'
+max = 14
+names = [
+    { name = "title", ignore = true },
+    { name = "idx" },
+    { name = "name" },
+    { name = "session" },
+    { name = "pid" },
+    { name = "path" },
+    { name = "state" },
+    { name = "agent" },
+    { name = "age" },
+    { name = "branch" },
+    { name = "sync" },
+    { name = "display", ignore = true }
+]
+
+[tui]
+mouse = true
+percentage = 100
+max = 9999
+
+[results]
+reverse = false
+spinner_prefix = "@SPIN@"
+spinner_inline = true
+spinner = "minidot"
+current_prefix = ""
+unselected_prefix = ""
+multi = false
+row_connection = "Full"
+column_spacing = 0
+
+[results.style]
+modifier = "DIM"
+
+[results.current_style]
+modifier = "BOLD"
+
+[results.current_nav_bar_style]
+fg = "cyan"
+modifier = "BOLD"
+
+[results.autoscroll]
+enabled = false
+
+[results.border]
+sides = ""
+
+[query]
+status_inline = true
+prompt = " "
+show = true
+
+[footer]
+content = " {cyan,bold:Enter} {darkgray:Jump} {darkgray:│} {cyan,bold:y/n} {darkgray:Ack} {darkgray:│} {cyan,bold:r} {darkgray:Review} {darkgray:│} {cyan,bold:i} {darkgray:Input} {darkgray:│} {cyan,bold:v} {darkgray:Diff} {darkgray:│} {cyan,bold:g} {darkgray:Git} {darkgray:│} {cyan,bold:a} {darkgray:Agents} {darkgray:│} {cyan,bold:Tab} {darkgray:Worktrees} {darkgray:│} {cyan,bold:?} {darkgray:Help} {darkgray:│} {cyan,bold:Esc} {darkgray:Exit}"
+row_connection = "Full"
+match_indent = false
+separator = "light"
+
+[footer.separator_style]
+fg = "Darkgray"
+
+[ui.nav]
+active = true
+focus_on_start = "picker"
+bar = "Plain"
+color = "black"
+hints = false
+
+[ui.nav.binds]
+"tab"           = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"shift-tab"     = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"backtab"       = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"shift-backtab" = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"backspace"     = ["Print(__JUMP_LAST_AGENT__)", "Quit"]
+"ctrl-h"        = ["Print(__JUMP_LAST_AGENT__)", "Quit"]
+"a"             = "@reloadnext"
+"A"             = "@reloadprev"
+"ctrl-a"        = "@reloadnext"
+"o"             = ["Print(__OPEN_PR__{=})", "Quit"]
+"O"             = ["Print(__OPEN_PR_CHECKS__{=})", "Quit"]
+"/"             = "FocusFilter"
+"s"             = ["Print(__SWITCH_SESSION__)", "Quit"]
+"S"             = ["Print(__SHIP_WORKTREE__{=})", "Quit"]
+"r"             = ["Execute(__WAYMUX_BIN__ review-notes send \"{=path}\" \"{=session}\" \"{=idx}\" \"{=pid}\")", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"w"             = ["Print(__NEW_WORKTREE__{=})", "Quit"]
+"W"             = ["Print(__SWEEP_WORKTREES__{=})", "Quit"]
+"R"             = ["Print(__REAP_AGENTS__{=})", "Quit"]
+"t"             = ["Print(__CREATE_WINDOW__{=})", "Quit"]
+"T"             = ["Print(__CREATE_WINDOW__{=})", "Quit"]
+"c"             = ["Print(__NEW_WORKTREE__{=})", "Quit"]
+"C"             = ["Print(__NEW_WORKTREE__{=})", "Quit"]
+"g"             = ["Print(__LAZYGIT__{=})", "Quit"]
+"gg"            = ["Print(__LAZYGIT__{=})", "Quit"]
+"G"             = ["Print(__LAZYGIT__{=})", "Quit"]
+"ctrl-g"        = ["Print(__LAZYGIT__{=})", "Quit"]
+"p"             = ["Print(__PATCH_MODE__{=})", "Quit"]
+"P"             = ["Print(__PATCH_MODE__{=})", "Quit"]
+"ctrl-p"        = ["Print(__PATCH_MODE__{=})", "Quit"]
+"?"             = "SwitchPreview(1)"
+"shift-?"       = "SwitchPreview(1)"
+"F1"            = "SwitchPreview(1)"
+"i"             = "LiveInput(tmux send-keys -t '{=pid}' {=keys})"
+"I"             = ["PromptInput(__WAYMUX_BIN__ agent-action prompt '{=state}' '{=pid}' {input})", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"y"             = ["ExecuteAsync(__WAYMUX_BIN__ agent-action approve '{=state}' '{=pid}')", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"Y"             = ["ExecuteAsync(__WAYMUX_BIN__ agent-action approve '{=state}' '{=pid}')", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"n"             = ["ExecuteAsync(__WAYMUX_BIN__ agent-action deny '{=state}' '{=pid}')", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"N"             = ["ExecuteAsync(__WAYMUX_BIN__ agent-action deny '{=state}' '{=pid}')", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"v"             = "SwitchPreview(2)"
+"V"             = "SwitchPreview(2)"
+"d"             = ["ExecuteAsync(printf '%s\n' '{=}' | __WAYMUX_BIN__ window-delete; sleep 0.05)", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"D"             = ["ExecuteAsync(printf '%s\n' '{=}' | __WAYMUX_BIN__ window-delete; sleep 0.05)", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"ctrl-d"        = ["ExecuteAsync(printf '%s\n' '{=}' | __WAYMUX_BIN__ window-delete; sleep 0.05)", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"x"             = ["ExecuteAsync(printf '%s\n' '{=}' | __WAYMUX_BIN__ window-delete; sleep 0.05)", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"X"             = ["ExecuteAsync(printf '%s\n' '{=}' | __WAYMUX_BIN__ window-delete; sleep 0.05)", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"J"             = "PreviewDown(5)"
+"K"             = "PreviewUp(5)"
+"+"             = "ExpandPreview(5)"
+"="             = "ExpandPreview(5)"
+"-"             = "ShrinkPreview(5)"
+"ctrl-r"        = "Reload(__WAYMUX_BIN__ cockpit-items)"
+","             = []
+
+[ui.border]
+sides = ""
+
+[previewer]
+debounce_ms = 20
+delay_clear = true
+
+[preview]
+show = true
+wrap = false
+poll_ms = 250
+
+[preview.media]
+active = false
+
+[preview.initial]
+tail = true
+
+[preview.border]
+sides = "LEFT"
+color = "Darkgray"
+
+[[preview.layout]]
+command = '__WAYMUX_BIN__ cockpit-preview "{=session}" "{=idx}" "{=pid}" "{=path}" "{=state}" "{=agent}" "{=age}" "{=branch}" "{=sync}"'
+side = "right"
+percentage = 60
+scroll.tail = true
+poll_ms = 250
+
+[[preview.layout]]
+command = '__WAYMUX_BIN__ cockpit-help'
+side = "right"
+percentage = 60
+
+[[preview.layout]]
+command = '__WAYMUX_BIN__ cockpit-diff "{=session}" "{=idx}" "{=pid}" "{=path}" "{=state}" "{=agent}" "{=age}" "{=branch}" "{=sync}"'
+side = "right"
+percentage = 60
+
+[binds]
+Start    = [
+    "ToggleColumn(title)", "ToggleColumn(name)", "ToggleColumn(session)",
+    "ToggleColumn(idx)", "ToggleColumn(pid)", "ToggleColumn(path)",
+    "ToggleColumn(state)", "ToggleColumn(agent)", "ToggleColumn(age)",
+    "ToggleColumn(branch)", "ToggleColumn(sync)"
+]
+"tab"           = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"shift-tab"     = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"backtab"       = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"shift-backtab" = ["Print(__SWITCH_AWT__{=})", "Quit"]
+"backspace"     = ["Print(__JUMP_LAST_AGENT__)", "Quit"]
+"ctrl-h"        = ["Print(__JUMP_LAST_AGENT__)", "Quit"]
+"a"             = "@reloadnext"
+"A"             = "@reloadprev"
+"ctrl-a"        = "@reloadnext"
+"o"             = ["Print(__OPEN_PR__{=})", "Quit"]
+"O"             = ["Print(__OPEN_PR_CHECKS__{=})", "Quit"]
+"ctrl-s"        = ["Print(__SWITCH_SESSION__)", "Quit"]
+"ctrl-g"        = ["Print(__LAZYGIT__{=})", "Quit"]
+"ctrl-p"        = ["Print(__PATCH_MODE__{=})", "Quit"]
+"ctrl-t"        = ["Print(__CREATE_WINDOW__{=})", "Quit"]
+"ctrl-v"        = "SwitchPreview(2)"
+"ctrl-d"        = ["ExecuteAsync(printf '%s\n' '{=}' | __WAYMUX_BIN__ window-delete; sleep 0.05)", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"ctrl-x"        = ["ExecuteAsync(printf '%s\n' '{=}' | __WAYMUX_BIN__ window-delete; sleep 0.05)", "Reload(__WAYMUX_BIN__ cockpit-items)"]
+"ctrl-r"        = "Reload(__WAYMUX_BIN__ cockpit-items)"
+"?"             = "SwitchPreview(1)"
+"shift-?"       = "SwitchPreview(1)"
+"F1"            = "SwitchPreview(1)"
+","             = []
+"@reload"       = "Reload(__WAYMUX_BIN__ cockpit-items)"

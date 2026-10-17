@@ -1,7 +1,16 @@
 [package]
 name = "acpd"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
+default-run = "acpd"
+
+[[bin]]
+name = "acpd"
+path = "src/main.rs"
+
+[[bin]]
+name = "waymux"
+path = "src/bin/waymux.rs"
 
 [dependencies]
 anyhow = "1"

@@ -275,7 +275,14 @@ async fn unset_tmux_window_state(pane_id: &str) {
 
 async fn set_tmux_pane_state(pane_id: &str, raw: &str) {
     let out = Command::new("tmux")
-        .args(["set-option", "-p", "-t", pane_id, "@ai_agent_state_raw", raw])
+        .args([
+            "set-option",
+            "-p",
+            "-t",
+            pane_id,
+            "@ai_agent_state_raw",
+            raw,
+        ])
         .output()
         .await;
     if let Ok(o) = out
@@ -290,7 +297,14 @@ async fn set_tmux_pane_state(pane_id: &str, raw: &str) {
 
 async fn unset_tmux_pane_state(pane_id: &str) {
     let out = Command::new("tmux")
-        .args(["set-option", "-p", "-u", "-t", pane_id, "@ai_agent_state_raw"])
+        .args([
+            "set-option",
+            "-p",
+            "-u",
+            "-t",
+            pane_id,
+            "@ai_agent_state_raw",
+        ])
         .output()
         .await;
     if let Ok(o) = out
